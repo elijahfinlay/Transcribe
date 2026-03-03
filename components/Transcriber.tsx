@@ -16,6 +16,7 @@ import type {
   AppState,
   ProgressInfo,
   TranscriptionWorkerMessage,
+  WordChunk,
 } from "@/lib/types";
 
 export default function Transcriber() {
@@ -28,10 +29,18 @@ export default function Transcriber() {
   const [fileSize, setFileSize] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState(false);
+  const [chunks, setChunks] = useState<WordChunk[]>([]);
+  const [activeWordIndex, setActiveWordIndex] = useState(-1);
+  const [audioSrc, setAudioSrc] = useState("");
 
   const workerRef = useRef<Worker | null>(null);
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const audioRef = useRef<HTMLAudioElement>(null);
+  const originalFileRef = useRef<File | null>(null);
+  const hasExportedRef = useRef(false);
+  const transcriptContainerRef = useRef<HTMLDivElement>(null);
+  const activeWordRef = useRef<HTMLSpanElement>(null);
 
   // Initialize transcription worker
   useEffect(() => {
@@ -57,6 +66,7 @@ export default function Transcriber() {
           break;
         case "result":
           setTranscript(msg.text);
+          setChunks(msg.chunks);
           setState("complete");
           setProgress(null);
           setStatus("");
@@ -144,10 +154,15 @@ export default function Transcriber() {
   const processFile = useCallback(async (file: File) => {
     setError("");
     setTranscript("");
+    setChunks([]);
+    setActiveWordIndex(-1);
+    setAudioSrc("");
     setFileName(file.name);
     setFileSize(formatFileSize(file.size));
     setProgress(null);
     setCopied(false);
+    originalFileRef.current = file;
+    hasExportedRef.current = false;
 
     const fileType = getFileType(file);
     if (fileType === "unknown") {
@@ -214,18 +229,103 @@ export default function Transcriber() {
     setProgress(null);
     setStatus("");
     setTranscript("");
+    setChunks([]);
+    setActiveWordIndex(-1);
     setError("");
     setFileName("");
     setFileSize("");
     setCopied(false);
+    if (audioSrc) URL.revokeObjectURL(audioSrc);
+    setAudioSrc("");
+    originalFileRef.current = null;
+    hasExportedRef.current = false;
     if (fileInputRef.current) fileInputRef.current.value = "";
-  }, []);
+  }, [audioSrc]);
 
   const copyToClipboard = useCallback(() => {
     navigator.clipboard.writeText(transcript);
     setCopied(true);
+    hasExportedRef.current = true;
     setTimeout(() => setCopied(false), 2000);
   }, [transcript]);
+
+  // Create Object URL for audio playback when transcription completes
+  useEffect(() => {
+    if (state === "complete" && originalFileRef.current && !audioSrc) {
+      const url = URL.createObjectURL(originalFileRef.current);
+      setAudioSrc(url);
+      return () => URL.revokeObjectURL(url);
+    }
+  }, [state, audioSrc]);
+
+  // beforeunload guard — warn if transcript hasn't been exported
+  useEffect(() => {
+    if (state !== "complete") return;
+    const handler = (e: BeforeUnloadEvent) => {
+      if (!hasExportedRef.current) {
+        e.preventDefault();
+      }
+    };
+    window.addEventListener("beforeunload", handler);
+    return () => window.removeEventListener("beforeunload", handler);
+  }, [state]);
+
+  // Sync active word with audio playback via timeupdate
+  useEffect(() => {
+    const audio = audioRef.current;
+    if (!audio || chunks.length === 0) return;
+
+    const onTimeUpdate = () => {
+      const t = audio.currentTime;
+      // Binary search for the active word
+      let lo = 0;
+      let hi = chunks.length - 1;
+      let idx = -1;
+      while (lo <= hi) {
+        const mid = (lo + hi) >> 1;
+        if (t >= chunks[mid].start && t < chunks[mid].end) {
+          idx = mid;
+          break;
+        } else if (t < chunks[mid].start) {
+          hi = mid - 1;
+        } else {
+          lo = mid + 1;
+        }
+      }
+      setActiveWordIndex(idx);
+    };
+
+    audio.addEventListener("timeupdate", onTimeUpdate);
+    return () => audio.removeEventListener("timeupdate", onTimeUpdate);
+  }, [chunks]);
+
+  // Auto-scroll active word into view
+  useEffect(() => {
+    if (activeWordIndex >= 0 && activeWordRef.current) {
+      activeWordRef.current.scrollIntoView({
+        behavior: "smooth",
+        block: "nearest",
+      });
+    }
+  }, [activeWordIndex]);
+
+  const seekToWord = useCallback(
+    (chunk: WordChunk) => {
+      const audio = audioRef.current;
+      if (!audio) return;
+      audio.currentTime = chunk.start;
+      if (audio.paused) audio.play();
+    },
+    []
+  );
+
+  const handleDownload = useCallback(
+    (fn: (text: string, name: string) => void) => {
+      hasExportedRef.current = true;
+      fn(transcript, fileName);
+    },
+    [transcript, fileName]
+  );
 
   const isProcessing =
     state === "extracting" ||
@@ -370,29 +470,63 @@ export default function Transcriber() {
                   {copied ? "Copied!" : "Copy"}
                 </button>
                 <button
-                  onClick={() => downloadTextFile(transcript, fileName)}
+                  onClick={() => handleDownload(downloadTextFile)}
                   className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
                 >
                   .txt
                 </button>
                 <button
-                  onClick={() => downloadPdfFile(transcript, fileName)}
+                  onClick={() => handleDownload(downloadPdfFile)}
                   className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
                 >
                   .pdf
                 </button>
                 <button
-                  onClick={() => downloadXmlFile(transcript, fileName)}
+                  onClick={() => handleDownload(downloadXmlFile)}
                   className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
                 >
                   .xml
                 </button>
               </div>
             </div>
-            <div className="max-h-[28rem] overflow-y-auto pr-2">
-              <p className="text-neutral-200 leading-relaxed whitespace-pre-wrap">
-                {transcript}
-              </p>
+
+            {/* Audio player */}
+            {audioSrc && (
+              <audio
+                ref={audioRef}
+                src={audioSrc}
+                controls
+                className="w-full mb-4 h-10 [&::-webkit-media-controls-panel]:bg-neutral-800"
+              />
+            )}
+
+            {/* Transcript with word-level highlighting */}
+            <div
+              ref={transcriptContainerRef}
+              className="max-h-[28rem] overflow-y-auto pr-2"
+            >
+              {chunks.length > 0 ? (
+                <p className="text-neutral-200 leading-relaxed">
+                  {chunks.map((chunk, i) => (
+                    <span
+                      key={i}
+                      ref={i === activeWordIndex ? activeWordRef : null}
+                      onClick={() => seekToWord(chunk)}
+                      className={`cursor-pointer rounded px-0.5 transition-colors duration-150 ${
+                        i === activeWordIndex
+                          ? "bg-blue-500/30 text-white"
+                          : "hover:bg-neutral-800"
+                      }`}
+                    >
+                      {chunk.text}
+                    </span>
+                  ))}
+                </p>
+              ) : (
+                <p className="text-neutral-200 leading-relaxed whitespace-pre-wrap">
+                  {transcript}
+                </p>
+              )}
             </div>
           </div>
 

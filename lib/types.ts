@@ -12,11 +12,17 @@ export interface ProgressInfo {
   detail?: string;
 }
 
+export interface WordChunk {
+  text: string;
+  start: number;
+  end: number;
+}
+
 // Messages FROM the transcription worker
 export type TranscriptionWorkerMessage =
   | { type: "status"; status: string }
   | { type: "progress"; progress: ProgressInfo }
-  | { type: "result"; text: string }
+  | { type: "result"; text: string; chunks: WordChunk[] }
   | { type: "error"; error: string };
 
 // Messages TO the transcription worker

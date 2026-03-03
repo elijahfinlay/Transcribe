@@ -47,11 +47,23 @@ self.onmessage = async (e: MessageEvent<TranscriptionWorkerRequest>) => {
       const result = await (transcriber as any)(e.data.audio, {
         chunk_length_s: 30,
         stride_length_s: 5,
-        return_timestamps: true,
+        return_timestamps: "word",
       });
 
       const text = typeof result === "string" ? result : result.text;
-      post({ type: "result", text });
+
+      const rawChunks: { text: string; timestamp: [number | null, number | null] }[] =
+        result.chunks ?? [];
+
+      const chunks = rawChunks
+        .filter((c) => c.timestamp[0] != null)
+        .map((c) => ({
+          text: c.text,
+          start: c.timestamp[0] as number,
+          end: (c.timestamp[1] ?? (c.timestamp[0] as number) + 0.2),
+        }));
+
+      post({ type: "result", text, chunks });
     } catch (error: any) {
       post({
         type: "error",
