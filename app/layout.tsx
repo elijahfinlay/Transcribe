@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Transcribe",
-  description: "Upload a video or audio file and transcribe it locally",
+  description: "Upload a video or audio file and transcribe it in your browser",
 };
 
 export default function RootLayout({

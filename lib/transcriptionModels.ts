@@ -20,9 +20,9 @@ export interface TranscriptionModelOption {
 export const TRANSCRIPTION_MODELS: readonly TranscriptionModelOption[] = [
   {
     key: "tiny-en",
-    modelId: "Xenova/whisper-tiny.en",
+    modelId: "onnx-community/whisper-tiny.en",
     name: "Tiny",
-    summary: "Best for quick drafts and short clips.",
+    summary: "Safest option for quick drafts and lower-power devices.",
     languageLabel: TRANSCRIPTION_LANGUAGE_LABEL,
     speedLabel: "Fastest",
     accuracyLabel: "Lowest accuracy",
@@ -31,9 +31,9 @@ export const TRANSCRIPTION_MODELS: readonly TranscriptionModelOption[] = [
   },
   {
     key: "base-en",
-    modelId: "Xenova/whisper-base.en",
+    modelId: "onnx-community/whisper-base.en",
     name: "Base",
-    summary: "Best default balance of speed and accuracy.",
+    summary: "Best balance for most browser-based transcription jobs.",
     languageLabel: TRANSCRIPTION_LANGUAGE_LABEL,
     speedLabel: "Balanced",
     accuracyLabel: "Better accuracy",
@@ -43,9 +43,9 @@ export const TRANSCRIPTION_MODELS: readonly TranscriptionModelOption[] = [
   },
   {
     key: "small-en",
-    modelId: "Xenova/whisper-small.en",
+    modelId: "onnx-community/whisper-small.en",
     name: "Small",
-    summary: "Slowest option here, but the most accurate.",
+    summary: "Highest accuracy, but the heaviest browser download.",
     languageLabel: TRANSCRIPTION_LANGUAGE_LABEL,
     speedLabel: "Slowest",
     accuracyLabel: "Best accuracy",

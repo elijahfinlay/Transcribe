@@ -3,7 +3,6 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
-    "postinstall": "node scripts/prune-runtime-deps.mjs",
     "dev": "next dev --webpack",
     "build": "next build --webpack",
     "start": "next start",
@@ -19,7 +18,6 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@huggingface/transformers": "^3.8.1",
-    "ffmpeg-static": "^5.3.0",
     "jspdf": "^4.2.0",
     "next": "^16.1.6",
     "react": "^19.2.4",
