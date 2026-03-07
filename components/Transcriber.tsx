@@ -436,6 +436,15 @@ export default function Transcriber() {
     state === "extracting" ||
     state === "loading-model" ||
     state === "transcribing";
+  const canSelectNewFile = !isProcessing;
+  const uploadTitle = fileName || "Drop audio or video here";
+  const uploadHint = isProcessing
+    ? "Current upload is processing."
+    : state === "complete"
+      ? "Click here to transcribe another file"
+      : state === "error"
+        ? "Click here to choose a different file"
+        : "or click to browse";
 
   return (
     <div className="mx-auto w-full max-w-2xl">
@@ -449,52 +458,70 @@ export default function Transcriber() {
         </p>
       </div>
 
-      {state === "idle" && (
-        <div
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`
-            mb-8 cursor-pointer rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
-            ${
-              dragOver
-                ? "scale-[1.01] border-blue-500 bg-blue-500/10"
-                : "border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900/50"
-            }
-          `}
+      <div
+        onDragOver={canSelectNewFile ? onDragOver : undefined}
+        onDragLeave={canSelectNewFile ? onDragLeave : undefined}
+        onDrop={canSelectNewFile ? onDrop : undefined}
+        onClick={() => {
+          if (canSelectNewFile) {
+            fileInputRef.current?.click();
+          }
+        }}
+        className={`
+          mb-8 rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
+          ${
+            canSelectNewFile
+              ? "cursor-pointer"
+              : "cursor-not-allowed opacity-75"
+          }
+          ${
+            dragOver && canSelectNewFile
+              ? "scale-[1.01] border-blue-500 bg-blue-500/10"
+              : "border-neutral-700 bg-neutral-900/30"
+          }
+          ${canSelectNewFile ? "hover:border-neutral-500 hover:bg-neutral-900/50" : ""}
+        `}
+      >
+        <svg
+          className="mx-auto mb-4 h-12 w-12 text-neutral-500"
+          fill="none"
+          viewBox="0 0 24 24"
+          strokeWidth={1.5}
+          stroke="currentColor"
         >
-          <svg
-            className="mx-auto mb-4 h-12 w-12 text-neutral-500"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={1.5}
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
-            />
-          </svg>
-          <p className="mb-2 text-lg font-medium">Drop audio or video here</p>
-          <p className="mb-4 text-sm text-neutral-500">or click to browse</p>
-          <p className="text-xs text-neutral-600">
-            MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
-          </p>
-          <p className="mt-2 text-xs text-neutral-600">
-            Video uploads stay local. The app extracts the audio track and
-            ignores the picture track.
-          </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={ACCEPTED_FORMATS}
-            onChange={onFileSelect}
-            className="hidden"
+          <path
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
           />
-        </div>
-      )}
+        </svg>
+        <p className="mb-2 text-lg font-medium">{uploadTitle}</p>
+        <p className="mb-4 text-sm text-neutral-500">{uploadHint}</p>
+        {fileName && fileSize ? (
+          <p className="mb-2 text-xs text-neutral-500">
+            {fileName} &middot; {fileSize}
+          </p>
+        ) : null}
+        <p className="text-xs text-neutral-600">
+          MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
+        </p>
+        <p className="mt-2 text-xs text-neutral-600">
+          Video uploads stay local. The app extracts the audio track and
+          ignores the picture track.
+        </p>
+        {!canSelectNewFile ? (
+          <p className="mt-2 text-xs text-neutral-500">
+            Choose another file after the current transcription finishes.
+          </p>
+        ) : null}
+        <input
+          ref={fileInputRef}
+          type="file"
+          accept={ACCEPTED_FORMATS}
+          onChange={onFileSelect}
+          className="hidden"
+        />
+      </div>
 
       <div className="mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
         <div className="flex flex-col gap-2">
