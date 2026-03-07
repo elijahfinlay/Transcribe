@@ -3,10 +3,13 @@
   "version": "1.0.0",
   "description": "",
   "scripts": {
-    "dev": "next dev --turbopack",
-    "build": "next build",
+    "postinstall": "node scripts/prune-runtime-deps.mjs",
+    "dev": "next dev --webpack",
+    "build": "next build --webpack",
     "start": "next start",
-    "lint": "next lint"
+    "typecheck": "next build --webpack",
+    "lint": "npm run typecheck",
+    "test": "node --experimental-strip-types --experimental-specifier-resolution=node --test tests/*.test.ts"
   },
   "keywords": [],
   "author": "",
@@ -16,6 +19,7 @@
     "@ffmpeg/ffmpeg": "^0.12.15",
     "@ffmpeg/util": "^0.12.2",
     "@huggingface/transformers": "^3.8.1",
+    "ffmpeg-static": "^5.3.0",
     "jspdf": "^4.2.0",
     "next": "^16.1.6",
     "react": "^19.2.4",

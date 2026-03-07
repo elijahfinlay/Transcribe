@@ -1,29 +1,17 @@
-const AUDIO_EXTENSIONS = new Set([
-  "mp3", "wav", "flac", "ogg", "m4a", "aac", "wma", "opus", "webm",
-]);
-
-const VIDEO_EXTENSIONS = new Set([
-  "mp4", "mkv", "avi", "mov", "wmv", "flv", "webm", "m4v", "mpg", "mpeg",
-]);
-
-export function getFileType(file: File): "audio" | "video" | "unknown" {
-  const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
-
-  if (AUDIO_EXTENSIONS.has(ext)) return "audio";
-  if (VIDEO_EXTENSIONS.has(ext)) return "video";
-
-  // Fallback to MIME type
-  if (file.type.startsWith("audio/")) return "audio";
-  if (file.type.startsWith("video/")) return "video";
-
-  return "unknown";
-}
+export { ACCEPTED_FORMATS, getFileType } from "./media";
 
 export function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   if (bytes < 1024 * 1024 * 1024) return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
   return `${(bytes / (1024 * 1024 * 1024)).toFixed(2)} GB`;
+}
+
+function escapeXml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }
 
 function triggerDownload(blob: Blob, filename: string) {
@@ -47,13 +35,11 @@ export function downloadTextFile(text: string, originalFileName: string) {
 }
 
 export function downloadXmlFile(text: string, originalFileName: string) {
-  const escaped = text
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+  const escaped = escapeXml(text);
+  const source = escapeXml(getBaseName(originalFileName));
   const xml = `<?xml version="1.0" encoding="UTF-8"?>
 <transcript>
-  <source>${getBaseName(originalFileName)}</source>
+  <source>${source}</source>
   <created>${new Date().toISOString()}</created>
   <text>${escaped}</text>
 </transcript>`;
@@ -94,8 +80,3 @@ export async function downloadPdfFile(text: string, originalFileName: string) {
 
   doc.save(`${baseName}_transcript.pdf`);
 }
-
-export const ACCEPTED_FORMATS = [
-  ...Array.from(AUDIO_EXTENSIONS),
-  ...Array.from(VIDEO_EXTENSIONS),
-].map((ext) => `.${ext}`).join(",");

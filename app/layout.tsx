@@ -3,7 +3,7 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Transcribe",
-  description: "In-browser audio & video transcription powered by Whisper",
+  description: "Upload a video or audio file and transcribe it locally",
 };
 
 export default function RootLayout({

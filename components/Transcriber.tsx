@@ -1,205 +1,334 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
-import { FFmpeg } from "@ffmpeg/ffmpeg";
-import { toBlobURL, fetchFile } from "@ffmpeg/util";
-import { decodeAudioFile } from "@/lib/audioUtils";
+import { useCallback, useEffect, useRef, useState } from "react";
+
 import {
-  getFileType,
-  formatFileSize,
+  ACCEPTED_FORMATS,
+  downloadPdfFile,
   downloadTextFile,
   downloadXmlFile,
-  downloadPdfFile,
-  ACCEPTED_FORMATS,
+  formatFileSize,
+  getFileType,
 } from "@/lib/fileUtils";
-import type {
-  AppState,
-  ProgressInfo,
-  TranscriptionWorkerMessage,
-  WordChunk,
-} from "@/lib/types";
+import {
+  DEFAULT_TRANSCRIPTION_MODEL_KEY,
+  TRANSCRIPTION_LANGUAGE_DESCRIPTION,
+  TRANSCRIPTION_LANGUAGE_LABEL,
+  getDefaultTranscriptionModel,
+  getTranscriptionModel,
+  TRANSCRIPTION_MODELS,
+  type TranscriptionModelKey,
+} from "@/lib/transcriptionModels";
+
+type AppState = "idle" | "uploading" | "complete" | "error";
+type HealthState = "checking" | "ready" | "error";
+type ProgressStage = "uploading" | "extracting" | "loading-model" | "transcribing";
+
+interface HealthResponse {
+  ready: boolean;
+  error?: string;
+  ffmpeg?: {
+    available: boolean;
+    version?: string;
+    error?: string;
+  };
+  languageSupport?: {
+    label: string;
+    description: string;
+  };
+}
+
+interface ProgressState {
+  stage: ProgressStage;
+  label: string;
+  percent: number;
+  detail?: string;
+}
+
+interface TranscriptionStageEvent {
+  type: "stage";
+  stage: Exclude<ProgressStage, "uploading">;
+  label: string;
+  percent: number;
+  detail?: string;
+}
+
+interface TranscriptionResultEvent {
+  type: "result";
+  text: string;
+  model?: string;
+  modelName?: string;
+}
+
+interface TranscriptionErrorEvent {
+  type: "error";
+  error: string;
+}
+
+type TranscriptionStreamEvent =
+  | TranscriptionStageEvent
+  | TranscriptionResultEvent
+  | TranscriptionErrorEvent;
+
+const TRANSCRIPTION_STAGES: Array<{
+  key: ProgressStage;
+  label: string;
+}> = [
+  { key: "uploading", label: "Upload" },
+  { key: "extracting", label: "Extract audio" },
+  { key: "loading-model", label: "Load model" },
+  { key: "transcribing", label: "Transcribe" },
+];
+
+const FALLBACK_HEALTH: HealthResponse = {
+  ready: false,
+  ffmpeg: {
+    available: false,
+    error: "Unable to verify ffmpeg on this machine.",
+  },
+  languageSupport: {
+    label: TRANSCRIPTION_LANGUAGE_LABEL,
+    description: TRANSCRIPTION_LANGUAGE_DESCRIPTION,
+  },
+};
+
+function getStageIndex(stage: ProgressStage) {
+  return TRANSCRIPTION_STAGES.findIndex((step) => step.key === stage);
+}
+
+async function consumeTranscriptionStream(
+  response: Response,
+  onEvent: (event: TranscriptionStreamEvent) => void
+) {
+  const reader = response.body?.getReader();
+
+  if (!reader) {
+    throw new Error("Streaming response was not available.");
+  }
+
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { done, value } = await reader.read();
+
+    if (done) {
+      break;
+    }
+
+    buffer += decoder.decode(value, { stream: true });
+
+    let newlineIndex = buffer.indexOf("\n");
+    while (newlineIndex >= 0) {
+      const line = buffer.slice(0, newlineIndex).trim();
+      buffer = buffer.slice(newlineIndex + 1);
+
+      if (line) {
+        onEvent(JSON.parse(line) as TranscriptionStreamEvent);
+      }
+
+      newlineIndex = buffer.indexOf("\n");
+    }
+  }
+
+  const trailingLine = buffer.trim();
+  if (trailingLine) {
+    onEvent(JSON.parse(trailingLine) as TranscriptionStreamEvent);
+  }
+}
+
+async function getResponseError(response: Response) {
+  const contentType = response.headers.get("content-type") ?? "";
+
+  if (contentType.includes("application/json")) {
+    const data = (await response.json()) as { error?: string };
+    return data.error || "Transcription failed.";
+  }
+
+  return (await response.text()) || "Transcription failed.";
+}
 
 export default function Transcriber() {
   const [state, setState] = useState<AppState>("idle");
-  const [progress, setProgress] = useState<ProgressInfo | null>(null);
   const [status, setStatus] = useState("");
+  const [progress, setProgress] = useState<ProgressState | null>(null);
+  const [healthState, setHealthState] = useState<HealthState>("checking");
+  const [health, setHealth] = useState<HealthResponse>(FALLBACK_HEALTH);
   const [transcript, setTranscript] = useState("");
   const [error, setError] = useState("");
   const [fileName, setFileName] = useState("");
   const [fileSize, setFileSize] = useState("");
   const [dragOver, setDragOver] = useState(false);
   const [copied, setCopied] = useState(false);
-  const [chunks, setChunks] = useState<WordChunk[]>([]);
-  const [activeWordIndex, setActiveWordIndex] = useState(-1);
-  const [audioSrc, setAudioSrc] = useState("");
+  const [previewSrc, setPreviewSrc] = useState("");
+  const [previewType, setPreviewType] = useState<"audio" | "video" | "">("");
+  const [selectedModelKey, setSelectedModelKey] =
+    useState<TranscriptionModelKey>(DEFAULT_TRANSCRIPTION_MODEL_KEY);
+  const [usedModelKey, setUsedModelKey] =
+    useState<TranscriptionModelKey>(DEFAULT_TRANSCRIPTION_MODEL_KEY);
 
-  const workerRef = useRef<Worker | null>(null);
-  const ffmpegRef = useRef<FFmpeg | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const audioRef = useRef<HTMLAudioElement>(null);
   const originalFileRef = useRef<File | null>(null);
   const hasExportedRef = useRef(false);
-  const transcriptContainerRef = useRef<HTMLDivElement>(null);
-  const activeWordRef = useRef<HTMLSpanElement>(null);
+  const selectedModel =
+    getTranscriptionModel(selectedModelKey) ?? getDefaultTranscriptionModel();
+  const usedModel =
+    getTranscriptionModel(usedModelKey) ?? getDefaultTranscriptionModel();
+  const uploadsDisabled = healthState !== "ready" || state === "uploading";
 
-  // Initialize transcription worker
-  useEffect(() => {
-    const worker = new Worker(
-      new URL("../workers/transcriptionWorker.ts", import.meta.url),
-      { type: "module" }
-    );
-
-    worker.onmessage = (e: MessageEvent<TranscriptionWorkerMessage>) => {
-      const msg = e.data;
-      switch (msg.type) {
-        case "status":
-          setStatus(msg.status);
-          break;
-        case "progress":
-          setProgress(msg.progress);
-          if (
-            msg.progress.stage.toLowerCase().includes("model") ||
-            msg.progress.stage.toLowerCase().includes("download")
-          ) {
-            setState("loading-model");
-          }
-          break;
-        case "result":
-          setTranscript(msg.text);
-          setChunks(msg.chunks);
-          setState("complete");
-          setProgress(null);
-          setStatus("");
-          break;
-        case "error":
-          setError(msg.error);
-          setState("error");
-          setProgress(null);
-          setStatus("");
-          break;
-      }
-    };
-
-    worker.onerror = (e) => {
-      setError(e.message || "Worker error");
-      setState("error");
-    };
-
-    workerRef.current = worker;
-    return () => worker.terminate();
-  }, []);
-
-  // Load FFmpeg lazily (only for video files)
-  async function loadFFmpeg(): Promise<FFmpeg> {
-    if (ffmpegRef.current) return ffmpegRef.current;
-
-    setStatus("Loading FFmpeg...");
-    const ffmpeg = new FFmpeg();
-    const baseURL = "https://unpkg.com/@ffmpeg/core@0.12.6/dist/esm";
-
-    await ffmpeg.load({
-      coreURL: await toBlobURL(
-        `${baseURL}/ffmpeg-core.js`,
-        "text/javascript"
-      ),
-      wasmURL: await toBlobURL(
-        `${baseURL}/ffmpeg-core.wasm`,
-        "application/wasm"
-      ),
-    });
-
-    ffmpegRef.current = ffmpeg;
-    return ffmpeg;
-  }
-
-  // Extract audio from video using FFmpeg
-  async function extractAudioFromVideo(file: File): Promise<Float32Array> {
-    const ffmpeg = await loadFFmpeg();
-
-    ffmpeg.on("progress", ({ progress: p }) => {
-      setProgress({
-        stage: "Extracting audio",
-        percent: Math.min(Math.round(p * 100), 100),
-      });
-    });
-
-    setStatus("Extracting audio from video...");
-    await ffmpeg.writeFile("input", await fetchFile(file));
-    await ffmpeg.exec([
-      "-i",
-      "input",
-      "-ar",
-      "16000",
-      "-ac",
-      "1",
-      "-f",
-      "wav",
-      "output.wav",
-    ]);
-
-    const wavData = await ffmpeg.readFile("output.wav");
-    const wavBlob = new Blob([new Uint8Array(wavData as Uint8Array)], { type: "audio/wav" });
-    const wavFile = new File([wavBlob], "extracted.wav", {
-      type: "audio/wav",
-    });
-
-    const audio = await decodeAudioFile(wavFile);
-
-    await ffmpeg.deleteFile("input");
-    await ffmpeg.deleteFile("output.wav");
-
-    return audio;
-  }
-
-  const processFile = useCallback(async (file: File) => {
-    setError("");
-    setTranscript("");
-    setChunks([]);
-    setActiveWordIndex(-1);
-    setAudioSrc("");
-    setFileName(file.name);
-    setFileSize(formatFileSize(file.size));
-    setProgress(null);
-    setCopied(false);
-    originalFileRef.current = file;
-    hasExportedRef.current = false;
-
-    const fileType = getFileType(file);
-    if (fileType === "unknown") {
-      setError(
-        "Unsupported file format. Please use an audio or video file."
-      );
-      setState("error");
-      return;
-    }
+  const refreshHealth = useCallback(async () => {
+    setHealthState("checking");
 
     try {
-      let audio: Float32Array;
+      const response = await fetch("/api/health", {
+        cache: "no-store",
+      });
+      const data = (await response.json()) as HealthResponse;
 
-      if (fileType === "video") {
-        setState("extracting");
-        audio = await extractAudioFromVideo(file);
-      } else {
-        setState("extracting");
-        setStatus("Decoding audio...");
-        audio = await decodeAudioFile(file);
+      if (!response.ok || !data.ready) {
+        setHealth({
+          ...FALLBACK_HEALTH,
+          ...data,
+          ffmpeg: {
+            available:
+              data.ffmpeg?.available ??
+              FALLBACK_HEALTH.ffmpeg?.available ??
+              false,
+            version: data.ffmpeg?.version ?? FALLBACK_HEALTH.ffmpeg?.version,
+            error:
+              data.ffmpeg?.error ?? data.error ?? FALLBACK_HEALTH.ffmpeg?.error,
+          },
+          languageSupport: data.languageSupport ?? FALLBACK_HEALTH.languageSupport,
+        });
+        setHealthState("error");
+        return;
       }
 
-      setState("transcribing");
-      setProgress(null);
-      setStatus("Starting transcription...");
-      workerRef.current?.postMessage({ type: "transcribe", audio });
-    } catch (err: any) {
-      setError(err.message || "Failed to process file");
-      setState("error");
+      setHealth(data);
+      setHealthState("ready");
+    } catch (err) {
+      setHealth({
+        ...FALLBACK_HEALTH,
+        error:
+          err instanceof Error ? err.message : "Health check request failed.",
+      });
+      setHealthState("error");
     }
   }, []);
 
-  // Drag and drop
-  const onDragOver = useCallback((e: React.DragEvent) => {
-    e.preventDefault();
-    setDragOver(true);
-  }, []);
+  useEffect(() => {
+    void refreshHealth();
+  }, [refreshHealth]);
+
+  const processFile = useCallback(
+    async (file: File) => {
+      if (healthState !== "ready") {
+        setError("Local transcription is not ready yet. Check the system status above.");
+        setState("error");
+        return;
+      }
+
+      setError("");
+      setTranscript("");
+      setFileName(file.name);
+      setFileSize(formatFileSize(file.size));
+      setCopied(false);
+      originalFileRef.current = file;
+      hasExportedRef.current = false;
+
+      const fileType = getFileType(file);
+      if (fileType === "unknown") {
+        setError("Unsupported file format. Please use an audio or video file.");
+        setState("error");
+        return;
+      }
+
+      try {
+        setState("uploading");
+        setStatus(`Uploading ${file.name}`);
+        setProgress({
+          stage: "uploading",
+          label: `Uploading ${file.name}`,
+          percent: 10,
+          detail: `Selected model: ${selectedModel.name}`,
+        });
+
+        const formData = new FormData();
+        formData.set("file", file);
+        formData.set("model", selectedModel.key);
+
+        const response = await fetch("/api/transcribe", {
+          method: "POST",
+          headers: {
+            accept: "application/x-ndjson",
+          },
+          body: formData,
+        });
+
+        if (!response.ok) {
+          throw new Error(await getResponseError(response));
+        }
+
+        let transcriptText = "";
+        let resultModelKey: string | undefined;
+
+        await consumeTranscriptionStream(response, (event) => {
+          if (event.type === "stage") {
+            setStatus(event.label);
+            setProgress({
+              stage: event.stage,
+              label: event.label,
+              percent: event.percent,
+              detail: event.detail,
+            });
+            return;
+          }
+
+          if (event.type === "error") {
+            throw new Error(event.error);
+          }
+
+          transcriptText = event.text;
+          resultModelKey = event.model;
+        });
+
+        if (!transcriptText) {
+          throw new Error("Transcription finished without a transcript.");
+        }
+
+        setPreviewType(fileType);
+        setTranscript(transcriptText);
+        setUsedModelKey(
+          getTranscriptionModel(resultModelKey)?.key ?? selectedModel.key
+        );
+        setProgress({
+          stage: "transcribing",
+          label: "Transcript ready",
+          percent: 100,
+        });
+        setState("complete");
+        setStatus("");
+      } catch (err) {
+        setError(
+          err instanceof Error ? err.message : "Failed to process the file."
+        );
+        setState("error");
+        setStatus("");
+        setProgress(null);
+      }
+    },
+    [healthState, selectedModel]
+  );
+
+  const onDragOver = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      if (!uploadsDisabled) {
+        setDragOver(true);
+      }
+    },
+    [uploadsDisabled]
+  );
 
   const onDragLeave = useCallback((e: React.DragEvent) => {
     e.preventDefault();
@@ -210,37 +339,49 @@ export default function Transcriber() {
     (e: React.DragEvent) => {
       e.preventDefault();
       setDragOver(false);
+
+      if (uploadsDisabled) {
+        return;
+      }
+
       const file = e.dataTransfer.files[0];
-      if (file) processFile(file);
+      if (file) {
+        void processFile(file);
+      }
     },
-    [processFile]
+    [processFile, uploadsDisabled]
   );
 
   const onFileSelect = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
-      if (file) processFile(file);
+      if (file) {
+        void processFile(file);
+      }
     },
     [processFile]
   );
 
   const reset = useCallback(() => {
     setState("idle");
-    setProgress(null);
     setStatus("");
+    setProgress(null);
     setTranscript("");
-    setChunks([]);
-    setActiveWordIndex(-1);
     setError("");
     setFileName("");
     setFileSize("");
     setCopied(false);
-    if (audioSrc) URL.revokeObjectURL(audioSrc);
-    setAudioSrc("");
+    if (previewSrc) {
+      URL.revokeObjectURL(previewSrc);
+    }
+    setPreviewSrc("");
+    setPreviewType("");
     originalFileRef.current = null;
     hasExportedRef.current = false;
-    if (fileInputRef.current) fileInputRef.current.value = "";
-  }, [audioSrc]);
+    if (fileInputRef.current) {
+      fileInputRef.current.value = "";
+    }
+  }, [previewSrc]);
 
   const copyToClipboard = useCallback(() => {
     navigator.clipboard.writeText(transcript);
@@ -249,121 +390,216 @@ export default function Transcriber() {
     setTimeout(() => setCopied(false), 2000);
   }, [transcript]);
 
-  // Create Object URL for audio playback when transcription completes
   useEffect(() => {
-    if (state === "complete" && originalFileRef.current && !audioSrc) {
-      const url = URL.createObjectURL(originalFileRef.current);
-      setAudioSrc(url);
-      return () => URL.revokeObjectURL(url);
+    if (state !== "complete" || !originalFileRef.current) {
+      return;
     }
-  }, [state, audioSrc]);
 
-  // beforeunload guard — warn if transcript hasn't been exported
+    const url = URL.createObjectURL(originalFileRef.current);
+    setPreviewSrc(url);
+
+    return () => {
+      URL.revokeObjectURL(url);
+    };
+  }, [state, fileName]);
+
   useEffect(() => {
-    if (state !== "complete") return;
+    if (state !== "complete") {
+      return;
+    }
+
     const handler = (e: BeforeUnloadEvent) => {
       if (!hasExportedRef.current) {
         e.preventDefault();
+        e.returnValue = "";
       }
     };
+
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [state]);
 
-  // Sync active word with audio playback via timeupdate
-  useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || chunks.length === 0) return;
-
-    const onTimeUpdate = () => {
-      const t = audio.currentTime;
-      // Binary search for the active word
-      let lo = 0;
-      let hi = chunks.length - 1;
-      let idx = -1;
-      while (lo <= hi) {
-        const mid = (lo + hi) >> 1;
-        if (t >= chunks[mid].start && t < chunks[mid].end) {
-          idx = mid;
-          break;
-        } else if (t < chunks[mid].start) {
-          hi = mid - 1;
-        } else {
-          lo = mid + 1;
-        }
-      }
-      setActiveWordIndex(idx);
-    };
-
-    audio.addEventListener("timeupdate", onTimeUpdate);
-    return () => audio.removeEventListener("timeupdate", onTimeUpdate);
-  }, [chunks]);
-
-  // Auto-scroll active word into view
-  useEffect(() => {
-    if (activeWordIndex >= 0 && activeWordRef.current) {
-      activeWordRef.current.scrollIntoView({
-        behavior: "smooth",
-        block: "nearest",
-      });
-    }
-  }, [activeWordIndex]);
-
-  const seekToWord = useCallback(
-    (chunk: WordChunk) => {
-      const audio = audioRef.current;
-      if (!audio) return;
-      audio.currentTime = chunk.start;
-      if (audio.paused) audio.play();
-    },
-    []
-  );
-
   const handleDownload = useCallback(
-    (fn: (text: string, name: string) => void) => {
+    (fn: (text: string, name: string) => void | Promise<void>) => {
       hasExportedRef.current = true;
-      fn(transcript, fileName);
+      void fn(transcript, fileName);
     },
     [transcript, fileName]
   );
 
-  const isProcessing =
-    state === "extracting" ||
-    state === "loading-model" ||
-    state === "transcribing";
+  const activeStageIndex = getStageIndex(progress?.stage ?? "uploading");
+  const languageSupport = health.languageSupport ?? FALLBACK_HEALTH.languageSupport;
+  const ffmpegStatusText =
+    healthState === "ready"
+      ? health.ffmpeg?.version || "ffmpeg detected"
+      : health.ffmpeg?.error || health.error || "Install ffmpeg and reload the app.";
 
   return (
-    <div className="w-full max-w-2xl mx-auto">
-      {/* Header */}
-      <div className="text-center mb-10">
-        <h1 className="text-5xl font-bold tracking-tight mb-3">Transcribe</h1>
-        <p className="text-neutral-400 text-lg">
-          Private, in-browser transcription powered by Whisper
+    <div className="mx-auto w-full max-w-2xl">
+      <div className="mb-10 text-center">
+        <h1 className="mb-3 text-5xl font-bold tracking-tight">Transcribe</h1>
+        <p className="text-lg text-neutral-400">
+          Upload a video and get the spoken audio back as text
         </p>
-        <p className="text-neutral-600 text-sm mt-1">
-          Your files never leave your device
+        <p className="mt-1 text-sm text-neutral-600">
+          Runs locally on this machine with Whisper and ffmpeg
         </p>
       </div>
 
-      {/* Idle — Drop Zone */}
+      <div
+        className={`mb-6 rounded-2xl border p-5 ${
+          healthState === "ready"
+            ? "border-emerald-900/60 bg-emerald-950/20"
+            : healthState === "checking"
+              ? "border-neutral-800 bg-neutral-900/50"
+              : "border-red-900/50 bg-red-950/20"
+        }`}
+      >
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+          <div>
+            <p className="text-sm font-medium text-neutral-100">System status</p>
+            <p className="mt-1 text-sm text-neutral-400">
+              {healthState === "ready"
+                ? "Ready to extract audio and transcribe locally."
+                : healthState === "checking"
+                  ? "Checking ffmpeg and local transcription dependencies."
+                  : "Setup required before uploads can run."}
+            </p>
+          </div>
+          <div className="flex items-center gap-2">
+            <span
+              className={`rounded-full px-3 py-1 text-xs font-medium ${
+                healthState === "ready"
+                  ? "bg-emerald-500/15 text-emerald-300"
+                  : healthState === "checking"
+                    ? "bg-neutral-800 text-neutral-300"
+                    : "bg-red-500/15 text-red-300"
+              }`}
+            >
+              {healthState === "ready"
+                ? "Ready"
+                : healthState === "checking"
+                  ? "Checking"
+                  : "Unavailable"}
+            </span>
+            <button
+              type="button"
+              onClick={() => void refreshHealth()}
+              disabled={healthState === "checking" || state === "uploading"}
+              className="rounded-full border border-neutral-700 px-3 py-1 text-xs text-neutral-300 transition-colors hover:border-neutral-500 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Recheck
+            </button>
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-2">
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+              ffmpeg
+            </p>
+            <p className="mt-2 text-sm text-neutral-200">{ffmpegStatusText}</p>
+          </div>
+          <div className="rounded-xl border border-neutral-800 bg-neutral-950/40 p-4">
+            <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">
+              Language support
+            </p>
+            <p className="mt-2 text-sm text-neutral-200">
+              {languageSupport?.label ?? TRANSCRIPTION_LANGUAGE_LABEL}
+            </p>
+            <p className="mt-1 text-xs text-neutral-500">
+              {languageSupport?.description ?? TRANSCRIPTION_LANGUAGE_DESCRIPTION}
+            </p>
+          </div>
+        </div>
+      </div>
+
+      <div className="mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+          <div>
+            <p className="text-sm font-medium text-neutral-100">
+              Whisper Model
+            </p>
+            <p className="text-xs text-neutral-500">
+              Ranked by speed and accuracy. Each model caches locally after its
+              first download.
+            </p>
+          </div>
+          <div className="text-xs text-neutral-500">
+            Selected: {selectedModel.name}
+          </div>
+        </div>
+
+        <div className="mt-4 grid gap-3 sm:grid-cols-3">
+          {TRANSCRIPTION_MODELS.map((option) => {
+            const isSelected = option.key === selectedModelKey;
+
+            return (
+              <button
+                key={option.key}
+                type="button"
+                onClick={() => setSelectedModelKey(option.key)}
+                disabled={uploadsDisabled}
+                className={`rounded-xl border p-4 text-left transition-colors ${
+                  isSelected
+                    ? "border-blue-500 bg-blue-500/10"
+                    : "border-neutral-800 bg-neutral-950/40 hover:border-neutral-700"
+                } ${uploadsDisabled ? "cursor-not-allowed opacity-70" : ""}`}
+              >
+                <div className="flex items-start justify-between gap-3">
+                  <div>
+                    <p className="font-medium text-neutral-100">{option.name}</p>
+                    <p className="mt-1 text-xs text-neutral-500">
+                      {option.summary}
+                    </p>
+                  </div>
+                  {option.recommended && (
+                    <span className="rounded-full bg-blue-500/15 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-blue-300">
+                      Recommended
+                    </span>
+                  )}
+                </div>
+
+                <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                  <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
+                    {option.languageLabel}
+                  </span>
+                  <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
+                    Speed: #{option.speedRank} {option.speedLabel}
+                  </span>
+                  <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
+                    Accuracy: #{option.accuracyRank} {option.accuracyLabel}
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </div>
+
       {state === "idle" && (
         <div
           onDragOver={onDragOver}
           onDragLeave={onDragLeave}
           onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
+          onClick={() => {
+            if (!uploadsDisabled) {
+              fileInputRef.current?.click();
+            }
+          }}
           className={`
-            border-2 border-dashed rounded-2xl p-16 text-center cursor-pointer
-            transition-all duration-200
+            rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
             ${
-              dragOver
-                ? "border-blue-500 bg-blue-500/10 scale-[1.01]"
-                : "border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900/50"
+              uploadsDisabled
+                ? "cursor-not-allowed border-neutral-800 bg-neutral-950/50 opacity-70"
+                : dragOver
+                  ? "cursor-pointer border-blue-500 bg-blue-500/10 scale-[1.01]"
+                  : "cursor-pointer border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900/50"
             }
           `}
         >
           <svg
-            className="w-12 h-12 mx-auto mb-4 text-neutral-500"
+            className="mx-auto mb-4 h-12 w-12 text-neutral-500"
             fill="none"
             viewBox="0 0 24 24"
             strokeWidth={1.5}
@@ -375,164 +611,166 @@ export default function Transcriber() {
               d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
             />
           </svg>
-          <p className="text-lg font-medium mb-2">
-            Drop an audio or video file here
+          <p className="mb-2 text-lg font-medium">
+            {uploadsDisabled
+              ? "Finish setup before uploading files"
+              : "Drop an audio or video file here"}
           </p>
-          <p className="text-sm text-neutral-500 mb-4">or click to browse</p>
+          <p className="mb-4 text-sm text-neutral-500">
+            {uploadsDisabled ? "ffmpeg must be available locally." : "or click to browse"}
+          </p>
           <p className="text-xs text-neutral-600">
-            MP3, WAV, FLAC, M4A, OGG, MP4, MKV, MOV, and more
+            MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
+          </p>
+          <p className="mt-3 text-xs text-neutral-500">
+            Selected model: {selectedModel.name} ({selectedModel.speedLabel},{" "}
+            {selectedModel.accuracyLabel}, {selectedModel.languageLabel})
           </p>
           <input
             ref={fileInputRef}
             type="file"
             accept={ACCEPTED_FORMATS}
             onChange={onFileSelect}
+            disabled={uploadsDisabled}
             className="hidden"
           />
         </div>
       )}
 
-      {/* Processing */}
-      {isProcessing && (
+      {state === "uploading" && (
         <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8">
-          <div className="flex items-center gap-3 mb-2">
+          <div className="mb-2 flex items-center gap-3">
             <div className="relative h-3 w-3">
-              <div className="absolute inset-0 rounded-full bg-blue-500 animate-ping opacity-75" />
-              <div className="relative rounded-full h-3 w-3 bg-blue-500" />
+              <div className="absolute inset-0 animate-ping rounded-full bg-blue-500 opacity-75" />
+              <div className="relative h-3 w-3 rounded-full bg-blue-500" />
             </div>
             <p className="font-medium">{status || "Processing..."}</p>
           </div>
 
           {fileName && (
-            <p className="text-sm text-neutral-500 mb-5 ml-6">
+            <p className="mb-5 ml-6 text-sm text-neutral-500">
               {fileName} &middot; {fileSize}
             </p>
           )}
 
-          {progress && (
-            <div>
-              <div className="flex justify-between text-sm text-neutral-400 mb-1.5">
-                <span>{progress.stage}</span>
-                <span>{progress.percent}%</span>
-              </div>
-              <div className="h-2 bg-neutral-800 rounded-full overflow-hidden">
-                <div
-                  className="h-full bg-blue-500 rounded-full transition-all duration-300 ease-out"
-                  style={{ width: `${progress.percent}%` }}
-                />
-              </div>
-              {progress.detail && (
-                <p className="text-xs text-neutral-600 mt-1.5 truncate">
-                  {progress.detail}
-                </p>
-              )}
-            </div>
-          )}
+          <div className="mb-4 flex flex-wrap gap-2">
+            {TRANSCRIPTION_STAGES.map((step, index) => {
+              const isComplete = index < activeStageIndex;
+              const isActive = index === activeStageIndex;
 
-          {!progress && (
-            <div className="h-2 bg-neutral-800 rounded-full overflow-hidden">
-              <div className="h-full bg-blue-500 rounded-full animate-pulse w-2/3" />
-            </div>
+              return (
+                <span
+                  key={step.key}
+                  className={`rounded-full px-3 py-1 text-xs font-medium ${
+                    isComplete
+                      ? "bg-emerald-500/15 text-emerald-300"
+                      : isActive
+                        ? "bg-blue-500/15 text-blue-300"
+                        : "bg-neutral-800 text-neutral-500"
+                  }`}
+                >
+                  {step.label}
+                </span>
+              );
+            })}
+          </div>
+
+          <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+            <div
+              className="h-full rounded-full bg-blue-500 transition-[width] duration-300"
+              style={{ width: `${progress?.percent ?? 10}%` }}
+            />
+          </div>
+          <p className="mt-3 text-xs text-neutral-600">
+            Using {selectedModel.name}. First run for each model can take longer
+            while files are cached locally.
+          </p>
+          {progress?.detail && (
+            <p className="mt-1 text-xs text-neutral-500">{progress.detail}</p>
           )}
         </div>
       )}
 
-      {/* Error */}
       {state === "error" && (
         <div className="rounded-2xl border border-red-900/50 bg-red-950/20 p-8">
-          <p className="text-red-400 font-medium mb-2">
-            Something went wrong
-          </p>
-          <p className="text-sm text-red-300/60 mb-6">{error}</p>
+          <p className="mb-2 font-medium text-red-400">Something went wrong</p>
+          <p className="mb-6 text-sm text-red-300/60">{error}</p>
           <button
             onClick={reset}
-            className="px-5 py-2.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
+            className="rounded-lg bg-neutral-800 px-5 py-2.5 text-sm transition-colors hover:bg-neutral-700"
           >
             Try again
           </button>
         </div>
       )}
 
-      {/* Result */}
       {state === "complete" && (
         <div className="space-y-4">
           <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-6">
-            <div className="flex items-center justify-between mb-4">
+            <div className="mb-4 flex items-center justify-between">
               <div>
                 <p className="text-sm text-neutral-400">{fileName}</p>
                 <p className="text-xs text-neutral-600">{fileSize}</p>
+                <p className="mt-1 text-xs text-neutral-500">
+                  Transcribed with {usedModel.name} · {usedModel.languageLabel} ·
+                  Speed rank #{usedModel.speedRank} · Accuracy rank #
+                  {usedModel.accuracyRank}
+                </p>
               </div>
-              <div className="flex gap-2 flex-wrap justify-end">
+              <div className="flex flex-wrap justify-end gap-2">
                 <button
                   onClick={copyToClipboard}
-                  className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
+                  className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm transition-colors hover:bg-neutral-700"
                 >
                   {copied ? "Copied!" : "Copy"}
                 </button>
                 <button
                   onClick={() => handleDownload(downloadTextFile)}
-                  className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
+                  className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm transition-colors hover:bg-neutral-700"
                 >
                   .txt
                 </button>
                 <button
                   onClick={() => handleDownload(downloadPdfFile)}
-                  className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
+                  className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm transition-colors hover:bg-neutral-700"
                 >
                   .pdf
                 </button>
                 <button
                   onClick={() => handleDownload(downloadXmlFile)}
-                  className="px-3 py-1.5 text-sm bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
+                  className="rounded-lg bg-neutral-800 px-3 py-1.5 text-sm transition-colors hover:bg-neutral-700"
                 >
                   .xml
                 </button>
               </div>
             </div>
 
-            {/* Audio player */}
-            {audioSrc && (
-              <audio
-                ref={audioRef}
-                src={audioSrc}
+            {previewSrc && previewType === "video" && (
+              <video
+                src={previewSrc}
                 controls
-                className="w-full mb-4 h-10 [&::-webkit-media-controls-panel]:bg-neutral-800"
+                className="mb-4 w-full rounded-xl bg-black"
               />
             )}
 
-            {/* Transcript with word-level highlighting */}
-            <div
-              ref={transcriptContainerRef}
-              className="max-h-[28rem] overflow-y-auto pr-2"
-            >
-              {chunks.length > 0 ? (
-                <p className="text-neutral-200 leading-relaxed">
-                  {chunks.map((chunk, i) => (
-                    <span
-                      key={i}
-                      ref={i === activeWordIndex ? activeWordRef : null}
-                      onClick={() => seekToWord(chunk)}
-                      className={`cursor-pointer rounded px-0.5 transition-colors duration-150 ${
-                        i === activeWordIndex
-                          ? "bg-blue-500/30 text-white"
-                          : "hover:bg-neutral-800"
-                      }`}
-                    >
-                      {chunk.text}
-                    </span>
-                  ))}
-                </p>
-              ) : (
-                <p className="text-neutral-200 leading-relaxed whitespace-pre-wrap">
-                  {transcript}
-                </p>
-              )}
+            {previewSrc && previewType === "audio" && (
+              <audio
+                src={previewSrc}
+                controls
+                className="mb-4 h-10 w-full [&::-webkit-media-controls-panel]:bg-neutral-800"
+              />
+            )}
+
+            <div className="max-h-[28rem] overflow-y-auto pr-2">
+              <p className="whitespace-pre-wrap leading-relaxed text-neutral-200">
+                {transcript}
+              </p>
             </div>
           </div>
 
           <button
             onClick={reset}
-            className="w-full py-3 text-sm font-medium bg-neutral-800 hover:bg-neutral-700 rounded-xl transition-colors"
+            className="w-full rounded-xl bg-neutral-800 py-3 text-sm font-medium transition-colors hover:bg-neutral-700"
           >
             Transcribe another file
           </button>
