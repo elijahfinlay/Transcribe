@@ -445,6 +445,20 @@ export default function Transcriber() {
       : state === "error"
         ? "Click here to choose a different file"
         : "or click to browse";
+  const uploadPanelClassName = isProcessing
+    ? "mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8"
+    : `
+        mb-8 rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
+        ${
+          canSelectNewFile ? "cursor-pointer" : "cursor-not-allowed opacity-75"
+        }
+        ${
+          dragOver && canSelectNewFile
+            ? "scale-[1.01] border-blue-500 bg-blue-500/10"
+            : "border-neutral-700 bg-neutral-900/30"
+        }
+        ${canSelectNewFile ? "hover:border-neutral-500 hover:bg-neutral-900/50" : ""}
+      `;
 
   return (
     <div className="mx-auto w-full max-w-2xl">
@@ -467,53 +481,89 @@ export default function Transcriber() {
             fileInputRef.current?.click();
           }
         }}
-        className={`
-          mb-8 rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
-          ${
-            canSelectNewFile
-              ? "cursor-pointer"
-              : "cursor-not-allowed opacity-75"
-          }
-          ${
-            dragOver && canSelectNewFile
-              ? "scale-[1.01] border-blue-500 bg-blue-500/10"
-              : "border-neutral-700 bg-neutral-900/30"
-          }
-          ${canSelectNewFile ? "hover:border-neutral-500 hover:bg-neutral-900/50" : ""}
-        `}
+        className={uploadPanelClassName}
       >
-        <svg
-          className="mx-auto mb-4 h-12 w-12 text-neutral-500"
-          fill="none"
-          viewBox="0 0 24 24"
-          strokeWidth={1.5}
-          stroke="currentColor"
-        >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
-          />
-        </svg>
-        <p className="mb-2 text-lg font-medium">{uploadTitle}</p>
-        <p className="mb-4 text-sm text-neutral-500">{uploadHint}</p>
-        {fileName && fileSize ? (
-          <p className="mb-2 text-xs text-neutral-500">
-            {fileName} &middot; {fileSize}
-          </p>
-        ) : null}
-        <p className="text-xs text-neutral-600">
-          MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
-        </p>
-        <p className="mt-2 text-xs text-neutral-600">
-          Video uploads stay local. The app extracts the audio track and
-          ignores the picture track.
-        </p>
-        {!canSelectNewFile ? (
-          <p className="mt-2 text-xs text-neutral-500">
-            Choose another file after the current transcription finishes.
-          </p>
-        ) : null}
+        {isProcessing ? (
+          <>
+            <div className="mb-2 flex items-center gap-3">
+              <div className="relative h-3 w-3">
+                <div className="absolute inset-0 animate-ping rounded-full bg-blue-500 opacity-75" />
+                <div className="relative h-3 w-3 rounded-full bg-blue-500" />
+              </div>
+              <p className="font-medium">{status || getStageLabel(progress)}</p>
+            </div>
+
+            {fileName && (
+              <p className="mb-5 ml-6 text-sm text-neutral-500">
+                {fileName} &middot; {fileSize}
+              </p>
+            )}
+
+            {progress ? (
+              <div>
+                <div className="mb-1.5 flex justify-between text-sm text-neutral-400">
+                  <span>{progress.stage}</span>
+                  <span>{progress.percent}%</span>
+                </div>
+                <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+                  <div
+                    className="h-full rounded-full bg-blue-500 transition-all duration-300 ease-out"
+                    style={{ width: `${progress.percent}%` }}
+                  />
+                </div>
+                {progress.detail && (
+                  <p className="mt-1.5 truncate text-xs text-neutral-600">
+                    {progress.detail}
+                  </p>
+                )}
+              </div>
+            ) : (
+              <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+                <div className="h-full w-2/3 animate-pulse rounded-full bg-blue-500" />
+              </div>
+            )}
+
+            <p className="mt-3 text-xs text-neutral-600">
+              Using {selectedModel.name}. The first run per model can take
+              longer while the browser downloads and caches it.
+            </p>
+          </>
+        ) : (
+          <>
+            <svg
+              className="mx-auto mb-4 h-12 w-12 text-neutral-500"
+              fill="none"
+              viewBox="0 0 24 24"
+              strokeWidth={1.5}
+              stroke="currentColor"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
+              />
+            </svg>
+            <p className="mb-2 text-lg font-medium">{uploadTitle}</p>
+            <p className="mb-4 text-sm text-neutral-500">{uploadHint}</p>
+            {fileName && fileSize ? (
+              <p className="mb-2 text-xs text-neutral-500">
+                {fileName} &middot; {fileSize}
+              </p>
+            ) : null}
+            <p className="text-xs text-neutral-600">
+              MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
+            </p>
+            <p className="mt-2 text-xs text-neutral-600">
+              Video uploads stay local. The app extracts the audio track and
+              ignores the picture track.
+            </p>
+            {!canSelectNewFile ? (
+              <p className="mt-2 text-xs text-neutral-500">
+                Choose another file after the current transcription finishes.
+              </p>
+            ) : null}
+          </>
+        )}
         <input
           ref={fileInputRef}
           type="file"
@@ -584,53 +634,6 @@ export default function Transcriber() {
           })}
         </div>
       </div>
-
-      {isProcessing && (
-        <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8">
-          <div className="mb-2 flex items-center gap-3">
-            <div className="relative h-3 w-3">
-              <div className="absolute inset-0 animate-ping rounded-full bg-blue-500 opacity-75" />
-              <div className="relative h-3 w-3 rounded-full bg-blue-500" />
-            </div>
-            <p className="font-medium">{status || getStageLabel(progress)}</p>
-          </div>
-
-          {fileName && (
-            <p className="mb-5 ml-6 text-sm text-neutral-500">
-              {fileName} &middot; {fileSize}
-            </p>
-          )}
-
-          {progress ? (
-            <div>
-              <div className="mb-1.5 flex justify-between text-sm text-neutral-400">
-                <span>{progress.stage}</span>
-                <span>{progress.percent}%</span>
-              </div>
-              <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
-                <div
-                  className="h-full rounded-full bg-blue-500 transition-all duration-300 ease-out"
-                  style={{ width: `${progress.percent}%` }}
-                />
-              </div>
-              {progress.detail && (
-                <p className="mt-1.5 truncate text-xs text-neutral-600">
-                  {progress.detail}
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
-              <div className="h-full w-2/3 animate-pulse rounded-full bg-blue-500" />
-            </div>
-          )}
-
-          <p className="mt-3 text-xs text-neutral-600">
-            Using {selectedModel.name}. The first run per model can take longer
-            while the browser downloads and caches it.
-          </p>
-        </div>
-      )}
 
       {state === "error" && (
         <div className="rounded-2xl border border-red-900/50 bg-red-950/20 p-8">
