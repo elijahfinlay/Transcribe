@@ -16,6 +16,21 @@ const transcriberPromises = new Map<string, Promise<any>>();
 
 const post = (msg: TranscriptionWorkerMessage) => self.postMessage(msg);
 
+function getErrorMessage(error: unknown) {
+  return error instanceof Error ? error.message : String(error ?? "");
+}
+
+function needsTimestampFallback(error: unknown) {
+  const message = getErrorMessage(error);
+
+  return (
+    message.includes("cross attentions") ||
+    message.includes("output_attentions=True") ||
+    message.includes("alignment_heads") ||
+    message.includes("token-level timestamps")
+  );
+}
+
 async function getTranscriber(modelKey: string) {
   const selectedModel =
     getTranscriptionModel(modelKey) ?? getDefaultTranscriptionModel();
@@ -62,6 +77,23 @@ async function getTranscriber(modelKey: string) {
   return nextPromise;
 }
 
+async function transcribeWithMode(
+  transcriber: any,
+  audio: Float32Array,
+  timestampMode: "word" | true | false
+) {
+  const options: Record<string, unknown> = {
+    chunk_length_s: 30,
+    stride_length_s: 5,
+  };
+
+  if (timestampMode) {
+    options.return_timestamps = timestampMode;
+  }
+
+  return transcriber(audio, options);
+}
+
 self.onmessage = async (e: MessageEvent<TranscriptionWorkerRequest>) => {
   if (e.data.type !== "transcribe") {
     return;
@@ -78,11 +110,35 @@ self.onmessage = async (e: MessageEvent<TranscriptionWorkerRequest>) => {
       status: `Transcribing with ${selectedModel.name}...`,
     });
 
-    const result = await transcriber(e.data.audio, {
-      chunk_length_s: 30,
-      stride_length_s: 5,
-      return_timestamps: "word",
-    });
+    let result;
+
+    try {
+      result = await transcribeWithMode(transcriber, e.data.audio, "word");
+    } catch (error) {
+      if (!needsTimestampFallback(error)) {
+        throw error;
+      }
+
+      post({
+        type: "status",
+        status: `Retrying ${selectedModel.name} without word-level timings...`,
+      });
+
+      try {
+        result = await transcribeWithMode(transcriber, e.data.audio, true);
+      } catch (segmentError) {
+        if (!needsTimestampFallback(segmentError)) {
+          throw segmentError;
+        }
+
+        post({
+          type: "status",
+          status: `Retrying ${selectedModel.name} with transcript-only output...`,
+        });
+
+        result = await transcribeWithMode(transcriber, e.data.audio, false);
+      }
+    }
 
     const text = typeof result === "string" ? result : result.text;
 
@@ -108,7 +164,7 @@ self.onmessage = async (e: MessageEvent<TranscriptionWorkerRequest>) => {
   } catch (error: any) {
     post({
       type: "error",
-      error: error?.message || "Transcription failed.",
+      error: getErrorMessage(error) || "Transcription failed.",
     });
   }
 };

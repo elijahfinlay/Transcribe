@@ -15,8 +15,6 @@ import {
 } from "@/lib/fileUtils";
 import {
   DEFAULT_TRANSCRIPTION_MODEL_KEY,
-  TRANSCRIPTION_LANGUAGE_DESCRIPTION,
-  TRANSCRIPTION_LANGUAGE_LABEL,
   getDefaultTranscriptionModel,
   getTranscriptionModel,
   TRANSCRIPTION_MODELS,
@@ -451,19 +449,65 @@ export default function Transcriber() {
         </p>
       </div>
 
+      {state === "idle" && (
+        <div
+          onDragOver={onDragOver}
+          onDragLeave={onDragLeave}
+          onDrop={onDrop}
+          onClick={() => fileInputRef.current?.click()}
+          className={`
+            mb-8 cursor-pointer rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
+            ${
+              dragOver
+                ? "scale-[1.01] border-blue-500 bg-blue-500/10"
+                : "border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900/50"
+            }
+          `}
+        >
+          <svg
+            className="mx-auto mb-4 h-12 w-12 text-neutral-500"
+            fill="none"
+            viewBox="0 0 24 24"
+            strokeWidth={1.5}
+            stroke="currentColor"
+          >
+            <path
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
+            />
+          </svg>
+          <p className="mb-2 text-lg font-medium">Drop audio or video here</p>
+          <p className="mb-4 text-sm text-neutral-500">or click to browse</p>
+          <p className="text-xs text-neutral-600">
+            MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
+          </p>
+          <p className="mt-2 text-xs text-neutral-600">
+            Video uploads stay local. The app extracts the audio track and
+            ignores the picture track.
+          </p>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept={ACCEPTED_FORMATS}
+            onChange={onFileSelect}
+            className="hidden"
+          />
+        </div>
+      )}
+
       <div className="mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-        <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex flex-col gap-2">
           <div>
-            <p className="text-sm font-medium text-neutral-100">
-              Whisper Model
-            </p>
+            <p className="text-sm font-medium text-neutral-100">Whisper Model</p>
             <p className="text-xs text-neutral-500">
               Ranked by speed and accuracy. Each model downloads once per
               browser and then stays cached locally.
             </p>
-          </div>
-          <div className="text-xs text-neutral-500">
-            Selected: {selectedModel.name}
+            <p className="mt-2 text-xs text-neutral-600">
+              English-only models. Better accuracy means a larger download and
+              slower transcription.
+            </p>
           </div>
         </div>
 
@@ -502,82 +546,17 @@ export default function Transcriber() {
                     {option.languageLabel}
                   </span>
                   <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
-                    Speed: #{option.speedRank} {option.speedLabel}
+                    Speed rank {option.speedRank}/3
                   </span>
                   <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
-                    Accuracy: #{option.accuracyRank} {option.accuracyLabel}
+                    Accuracy rank {option.accuracyRank}/3
                   </span>
                 </div>
               </button>
             );
           })}
         </div>
-
-        <div className="mt-4 rounded-xl border border-neutral-800 bg-neutral-950/40 p-4">
-          <p className="text-xs font-medium uppercase tracking-wide text-neutral-500">
-            Language Support
-          </p>
-          <p className="mt-2 text-sm text-neutral-200">
-            {TRANSCRIPTION_LANGUAGE_LABEL}
-          </p>
-          <p className="mt-1 text-xs text-neutral-500">
-            {TRANSCRIPTION_LANGUAGE_DESCRIPTION}
-          </p>
-        </div>
       </div>
-
-      {state === "idle" && (
-        <div
-          onDragOver={onDragOver}
-          onDragLeave={onDragLeave}
-          onDrop={onDrop}
-          onClick={() => fileInputRef.current?.click()}
-          className={`
-            cursor-pointer rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
-            ${
-              dragOver
-                ? "scale-[1.01] border-blue-500 bg-blue-500/10"
-                : "border-neutral-700 hover:border-neutral-500 hover:bg-neutral-900/50"
-            }
-          `}
-        >
-          <svg
-            className="mx-auto mb-4 h-12 w-12 text-neutral-500"
-            fill="none"
-            viewBox="0 0 24 24"
-            strokeWidth={1.5}
-            stroke="currentColor"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
-            />
-          </svg>
-          <p className="mb-2 text-lg font-medium">
-            Drop an audio or video file here
-          </p>
-          <p className="mb-4 text-sm text-neutral-500">or click to browse</p>
-          <p className="text-xs text-neutral-600">
-            MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
-          </p>
-          <p className="mt-3 text-xs text-neutral-500">
-            Selected model: {selectedModel.name} ({selectedModel.speedLabel},{" "}
-            {selectedModel.accuracyLabel})
-          </p>
-          <p className="mt-2 text-xs text-neutral-600">
-            Video uploads stay local. The app extracts the audio track and
-            ignores the image track.
-          </p>
-          <input
-            ref={fileInputRef}
-            type="file"
-            accept={ACCEPTED_FORMATS}
-            onChange={onFileSelect}
-            className="hidden"
-          />
-        </div>
-      )}
 
       {isProcessing && (
         <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8">
@@ -647,9 +626,9 @@ export default function Transcriber() {
                 <p className="text-sm text-neutral-400">{fileName}</p>
                 <p className="text-xs text-neutral-600">{fileSize}</p>
                 <p className="mt-1 text-xs text-neutral-500">
-                  Transcribed with {usedModel.name} · Speed rank #
-                  {usedModel.speedRank} · Accuracy rank #
-                  {usedModel.accuracyRank}
+                  Transcribed with {usedModel.name} · Speed rank{" "}
+                  {usedModel.speedRank}/3 · Accuracy rank{" "}
+                  {usedModel.accuracyRank}/3
                 </p>
               </div>
               <div className="flex flex-wrap justify-end gap-2">
