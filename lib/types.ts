@@ -36,3 +36,28 @@ export interface TranscriptionWorkerRequest {
   audio: Float32Array;
   modelKey: string;
 }
+
+// Review & Feedback types
+
+export interface Review {
+  id: string;
+  author: string;
+  text: string;
+  rating: number;
+  createdAt: number;
+}
+
+export interface TranscriptFeedback {
+  id: string;
+  author: string;
+  comment: string;
+  startIndex: number;
+  endIndex: number;
+  startTime: number;
+  endTime: number;
+  selectedText: string;
+  createdAt: number;
+}
+
+// Source type for how the transcript was created
+export type TranscriptSource = "file" | "youtube";

@@ -3,7 +3,7 @@ import type { NextConfig } from "next";
 const browserWorkerHeaders = [
   {
     key: "Cross-Origin-Embedder-Policy",
-    value: "require-corp",
+    value: "credentialless",
   },
   {
     key: "Cross-Origin-Opener-Policy",

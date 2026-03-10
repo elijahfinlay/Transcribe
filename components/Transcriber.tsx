@@ -23,15 +23,43 @@ import {
 import type {
   AppState,
   ProgressInfo,
+  TranscriptSource,
   TranscriptionWorkerMessage,
   WordChunk,
 } from "@/lib/types";
+import ReviewSystem from "./ReviewSystem";
+import OnboardingWalkthrough from "./OnboardingWalkthrough";
 
 const FFMPEG_CORE_VERSION = "0.12.9";
 const FFMPEG_BASE_URL = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/umd`;
 
 function getStageLabel(progress: ProgressInfo | null) {
   return progress?.stage || "Processing...";
+}
+
+function extractYouTubeVideoId(url: string): string | null {
+  try {
+    const parsed = new URL(url);
+    if (parsed.hostname === "youtu.be") {
+      return parsed.pathname.slice(1) || null;
+    }
+    if (
+      parsed.hostname === "www.youtube.com" ||
+      parsed.hostname === "youtube.com" ||
+      parsed.hostname === "m.youtube.com"
+    ) {
+      if (parsed.pathname.startsWith("/embed/")) {
+        return parsed.pathname.split("/")[2] || null;
+      }
+      if (parsed.pathname.startsWith("/shorts/")) {
+        return parsed.pathname.split("/")[2] || null;
+      }
+      return parsed.searchParams.get("v");
+    }
+  } catch {
+    if (/^[a-zA-Z0-9_-]{11}$/.test(url)) return url;
+  }
+  return null;
 }
 
 export default function Transcriber() {
@@ -53,6 +81,13 @@ export default function Transcriber() {
   const [usedModelKey, setUsedModelKey] =
     useState<TranscriptionModelKey>(DEFAULT_TRANSCRIPTION_MODEL_KEY);
 
+  // YouTube state
+  const [youtubeUrl, setYoutubeUrl] = useState("");
+  const [youtubeVideoId, setYoutubeVideoId] = useState("");
+  const [transcriptSource, setTranscriptSource] =
+    useState<TranscriptSource>("file");
+  const [youtubeFetching, setYoutubeFetching] = useState(false);
+
   const workerRef = useRef<Worker | null>(null);
   const ffmpegRef = useRef<FFmpeg | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -60,11 +95,22 @@ export default function Transcriber() {
   const originalFileRef = useRef<File | null>(null);
   const hasExportedRef = useRef(false);
   const activeWordRef = useRef<HTMLSpanElement | null>(null);
+  const playerContainerRef = useRef<HTMLDivElement | null>(null);
+  const ytPlayerRef = useRef<any>(null);
+  const ytIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const chunksRef = useRef<WordChunk[]>([]);
+
+  // Keep chunksRef in sync for YouTube polling interval
+  useEffect(() => {
+    chunksRef.current = chunks;
+  }, [chunks]);
 
   const selectedModel =
     getTranscriptionModel(selectedModelKey) ?? getDefaultTranscriptionModel();
   const usedModel =
     getTranscriptionModel(usedModelKey) ?? getDefaultTranscriptionModel();
+
+  // ─── Web Worker Setup ─────────────────────────────────────────────
 
   useEffect(() => {
     const worker = new Worker(
@@ -123,6 +169,8 @@ export default function Transcriber() {
       worker.terminate();
     };
   }, []);
+
+  // ─── FFmpeg ───────────────────────────────────────────────────────
 
   const loadFFmpeg = useCallback(async () => {
     if (ffmpegRef.current) {
@@ -220,6 +268,8 @@ export default function Transcriber() {
     [loadFFmpeg]
   );
 
+  // ─── File Processing ──────────────────────────────────────────────
+
   const processFile = useCallback(
     async (file: File) => {
       setError("");
@@ -232,6 +282,8 @@ export default function Transcriber() {
       setCopied(false);
       setPreviewSrc("");
       setPreviewType("");
+      setTranscriptSource("file");
+      setYoutubeVideoId("");
       originalFileRef.current = file;
       hasExportedRef.current = false;
 
@@ -281,6 +333,67 @@ export default function Transcriber() {
     [extractAudioFromVideo, selectedModel]
   );
 
+  // ─── YouTube Transcript Fetch ─────────────────────────────────────
+
+  const fetchYoutubeTranscript = useCallback(async () => {
+    const trimmed = youtubeUrl.trim();
+    if (!trimmed) return;
+
+    const videoId = extractYouTubeVideoId(trimmed);
+    if (!videoId) {
+      setError("Could not extract a YouTube video ID from that URL.");
+      setState("error");
+      return;
+    }
+
+    setError("");
+    setTranscript("");
+    setChunks([]);
+    setActiveWordIndex(-1);
+    setPreviewSrc("");
+    setPreviewType("");
+    setFileName(`YouTube: ${videoId}`);
+    setFileSize("");
+    setCopied(false);
+    setTranscriptSource("youtube");
+    originalFileRef.current = null;
+    hasExportedRef.current = false;
+    setYoutubeFetching(true);
+    setState("extracting");
+    setStatus("Fetching YouTube transcript...");
+    setProgress({ stage: "Fetching transcript", percent: 30 });
+
+    try {
+      const res = await fetch("/api/youtube-transcript", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url: trimmed }),
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) {
+        throw new Error(data.error || "Failed to fetch transcript.");
+      }
+
+      setYoutubeVideoId(data.videoId);
+      setTranscript(data.text);
+      setChunks(data.chunks);
+      setState("complete");
+      setProgress(null);
+      setStatus("");
+    } catch (err: any) {
+      setError(err?.message || "Failed to fetch the YouTube transcript.");
+      setState("error");
+      setProgress(null);
+      setStatus("");
+    } finally {
+      setYoutubeFetching(false);
+    }
+  }, [youtubeUrl]);
+
+  // ─── Drag & Drop / File Input ─────────────────────────────────────
+
   const onDragOver = useCallback((event: React.DragEvent) => {
     event.preventDefault();
     setDragOver(true);
@@ -313,6 +426,8 @@ export default function Transcriber() {
     [processFile]
   );
 
+  // ─── Reset ────────────────────────────────────────────────────────
+
   const reset = useCallback(() => {
     setState("idle");
     setProgress(null);
@@ -324,6 +439,9 @@ export default function Transcriber() {
     setFileName("");
     setFileSize("");
     setCopied(false);
+    setYoutubeVideoId("");
+    setYoutubeUrl("");
+    setTranscriptSource("file");
     if (previewSrc) {
       URL.revokeObjectURL(previewSrc);
     }
@@ -334,7 +452,19 @@ export default function Transcriber() {
     if (fileInputRef.current) {
       fileInputRef.current.value = "";
     }
+    if (ytIntervalRef.current) {
+      clearInterval(ytIntervalRef.current);
+      ytIntervalRef.current = null;
+    }
+    if (ytPlayerRef.current) {
+      try {
+        ytPlayerRef.current.destroy();
+      } catch {}
+      ytPlayerRef.current = null;
+    }
   }, [previewSrc]);
+
+  // ─── Clipboard ────────────────────────────────────────────────────
 
   const copyToClipboard = useCallback(() => {
     navigator.clipboard.writeText(transcript);
@@ -343,8 +473,14 @@ export default function Transcriber() {
     setTimeout(() => setCopied(false), 2000);
   }, [transcript]);
 
+  // ─── Preview URL for local files ──────────────────────────────────
+
   useEffect(() => {
-    if (state !== "complete" || !originalFileRef.current) {
+    if (
+      state !== "complete" ||
+      !originalFileRef.current ||
+      transcriptSource === "youtube"
+    ) {
       return;
     }
 
@@ -354,7 +490,9 @@ export default function Transcriber() {
     return () => {
       URL.revokeObjectURL(url);
     };
-  }, [state, fileName]);
+  }, [state, fileName, transcriptSource]);
+
+  // ─── Before Unload Warning ────────────────────────────────────────
 
   useEffect(() => {
     if (state !== "complete") {
@@ -371,6 +509,8 @@ export default function Transcriber() {
     window.addEventListener("beforeunload", handler);
     return () => window.removeEventListener("beforeunload", handler);
   }, [state]);
+
+  // ─── Time-sync for local media ────────────────────────────────────
 
   useEffect(() => {
     const media = mediaRef.current;
@@ -403,6 +543,99 @@ export default function Transcriber() {
     return () => media.removeEventListener("timeupdate", onTimeUpdate);
   }, [chunks, previewSrc, previewType]);
 
+  // ─── YouTube IFrame Player API ────────────────────────────────────
+
+  useEffect(() => {
+    if (!youtubeVideoId || state !== "complete") return;
+
+    // Load the YT API script if not already loaded
+    if (!(window as any).YT) {
+      const tag = document.createElement("script");
+      tag.src = "https://www.youtube.com/iframe_api";
+      document.head.appendChild(tag);
+    }
+
+    let cancelled = false;
+
+    const createPlayer = () => {
+      if (cancelled) return;
+      const YT = (window as any).YT;
+      if (!YT?.Player) return;
+
+      // Ensure the container element exists in the DOM
+      const container = document.getElementById("yt-player-container");
+      if (!container) return;
+
+      ytPlayerRef.current = new YT.Player("yt-player-container", {
+        videoId: youtubeVideoId,
+        playerVars: {
+          autoplay: 0,
+          modestbranding: 1,
+          rel: 0,
+        },
+        events: {
+          onReady: () => {
+            if (cancelled) return;
+            // Start polling for time updates — use chunksRef to avoid stale closure
+            if (ytIntervalRef.current) clearInterval(ytIntervalRef.current);
+            ytIntervalRef.current = setInterval(() => {
+              const player = ytPlayerRef.current;
+              if (!player?.getCurrentTime) return;
+              const currentChunks = chunksRef.current;
+              if (currentChunks.length === 0) return;
+              const time = player.getCurrentTime();
+              let lo = 0;
+              let hi = currentChunks.length - 1;
+              let index = -1;
+
+              while (lo <= hi) {
+                const mid = (lo + hi) >> 1;
+                if (
+                  time >= currentChunks[mid].start &&
+                  time < currentChunks[mid].end
+                ) {
+                  index = mid;
+                  break;
+                } else if (time < currentChunks[mid].start) {
+                  hi = mid - 1;
+                } else {
+                  lo = mid + 1;
+                }
+              }
+
+              setActiveWordIndex(index);
+            }, 250);
+          },
+        },
+      });
+    };
+
+    if ((window as any).YT?.Player) {
+      createPlayer();
+    } else {
+      (window as any).onYouTubeIframeAPIReady = createPlayer;
+    }
+
+    return () => {
+      cancelled = true;
+      if ((window as any).onYouTubeIframeAPIReady === createPlayer) {
+        (window as any).onYouTubeIframeAPIReady = null;
+      }
+      if (ytIntervalRef.current) {
+        clearInterval(ytIntervalRef.current);
+        ytIntervalRef.current = null;
+      }
+      if (ytPlayerRef.current) {
+        try {
+          ytPlayerRef.current.destroy();
+        } catch {}
+        ytPlayerRef.current = null;
+      }
+    };
+  }, [youtubeVideoId, state]);
+
+  // ─── Active word auto-scroll ──────────────────────────────────────
+
   useEffect(() => {
     if (activeWordIndex >= 0 && activeWordRef.current) {
       activeWordRef.current.scrollIntoView({
@@ -412,17 +645,49 @@ export default function Transcriber() {
     }
   }, [activeWordIndex]);
 
-  const seekToWord = useCallback((chunk: WordChunk) => {
-    const media = mediaRef.current;
-    if (!media) {
-      return;
-    }
+  // ─── Seek functions ───────────────────────────────────────────────
 
-    media.currentTime = chunk.start;
-    if (media.paused) {
-      void media.play().catch(() => {});
-    }
-  }, []);
+  const seekToWord = useCallback(
+    (chunk: WordChunk) => {
+      if (transcriptSource === "youtube") {
+        const player = ytPlayerRef.current;
+        if (!player?.seekTo) return;
+        player.seekTo(chunk.start, true);
+        if (player.getPlayerState?.() !== 1) {
+          player.playVideo();
+        }
+      } else {
+        const media = mediaRef.current;
+        if (!media) return;
+        media.currentTime = chunk.start;
+        if (media.paused) {
+          void media.play().catch(() => {});
+        }
+      }
+    },
+    [transcriptSource]
+  );
+
+  const seekToTime = useCallback(
+    (time: number) => {
+      if (transcriptSource === "youtube") {
+        const player = ytPlayerRef.current;
+        if (!player?.seekTo) return;
+        player.seekTo(time, true);
+        if (player.getPlayerState?.() !== 1) {
+          player.playVideo();
+        }
+      } else {
+        const media = mediaRef.current;
+        if (!media) return;
+        media.currentTime = time;
+        if (media.paused) {
+          void media.play().catch(() => {});
+        }
+      }
+    },
+    [transcriptSource]
+  );
 
   const handleDownload = useCallback(
     (fn: (text: string, name: string) => void | Promise<void>) => {
@@ -432,11 +697,13 @@ export default function Transcriber() {
     [transcript, fileName]
   );
 
+  // ─── Derived State ────────────────────────────────────────────────
+
   const isProcessing =
     state === "extracting" ||
     state === "loading-model" ||
     state === "transcribing";
-  const canSelectNewFile = !isProcessing;
+  const canSelectNewFile = !isProcessing && !youtubeFetching;
   const uploadTitle = fileName || "Drop audio or video here";
   const uploadHint = isProcessing
     ? "Current upload is processing."
@@ -446,9 +713,9 @@ export default function Transcriber() {
         ? "Click here to choose a different file"
         : "or click to browse";
   const uploadPanelClassName = isProcessing
-    ? "mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8"
+    ? "rounded-2xl border border-neutral-800 bg-neutral-900/50 p-8"
     : `
-        mb-8 rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
+        rounded-2xl border-2 border-dashed p-16 text-center transition-all duration-200
         ${
           canSelectNewFile ? "cursor-pointer" : "cursor-not-allowed opacity-75"
         }
@@ -460,181 +727,241 @@ export default function Transcriber() {
         ${canSelectNewFile ? "hover:border-neutral-500 hover:bg-neutral-900/50" : ""}
       `;
 
+  // ─── Render ───────────────────────────────────────────────────────
+
   return (
     <div className="mx-auto w-full max-w-2xl">
+      <OnboardingWalkthrough />
+
       <div className="mb-10 text-center">
         <h1 className="mb-3 text-5xl font-bold tracking-tight">Transcribe</h1>
         <p className="text-lg text-neutral-400">
-          Upload a video and transcribe only its audio, locally in your browser
+          Upload a video or paste a YouTube URL to get a transcript
         </p>
         <p className="mt-1 text-sm text-neutral-600">
-          The picture is ignored. Your file stays on your device.
+          Local files stay on your device. YouTube transcripts are fetched from
+          captions.
         </p>
       </div>
 
-      <div
-        onDragOver={canSelectNewFile ? onDragOver : undefined}
-        onDragLeave={canSelectNewFile ? onDragLeave : undefined}
-        onDrop={canSelectNewFile ? onDrop : undefined}
-        onClick={() => {
-          if (canSelectNewFile) {
-            fileInputRef.current?.click();
-          }
-        }}
-        className={uploadPanelClassName}
-      >
-        {isProcessing ? (
-          <>
-            <div className="mb-2 flex items-center gap-3">
-              <div className="relative h-3 w-3">
-                <div className="absolute inset-0 animate-ping rounded-full bg-blue-500 opacity-75" />
-                <div className="relative h-3 w-3 rounded-full bg-blue-500" />
-              </div>
-              <p className="font-medium">{status || getStageLabel(progress)}</p>
-            </div>
-
-            {fileName && (
-              <p className="mb-5 ml-6 text-sm text-neutral-500">
-                {fileName} &middot; {fileSize}
-              </p>
-            )}
-
-            {progress ? (
-              <div>
-                <div className="mb-1.5 flex justify-between text-sm text-neutral-400">
-                  <span>{progress.stage}</span>
-                  <span>{progress.percent}%</span>
-                </div>
-                <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
-                  <div
-                    className="h-full rounded-full bg-blue-500 transition-all duration-300 ease-out"
-                    style={{ width: `${progress.percent}%` }}
-                  />
-                </div>
-                {progress.detail && (
-                  <p className="mt-1.5 truncate text-xs text-neutral-600">
-                    {progress.detail}
-                  </p>
-                )}
-              </div>
-            ) : (
-              <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
-                <div className="h-full w-2/3 animate-pulse rounded-full bg-blue-500" />
-              </div>
-            )}
-
-            <p className="mt-3 text-xs text-neutral-600">
-              Using {selectedModel.name}. The first run per model can take
-              longer while the browser downloads and caches it.
-            </p>
-          </>
-        ) : (
-          <>
-            <svg
-              className="mx-auto mb-4 h-12 w-12 text-neutral-500"
-              fill="none"
-              viewBox="0 0 24 24"
-              strokeWidth={1.5}
-              stroke="currentColor"
+      {/* ─── YouTube URL Input ─────────────────────────────────── */}
+      {state !== "complete" && (
+        <div className="mb-4 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <p className="mb-3 text-sm font-medium text-neutral-100">
+            YouTube URL
+          </p>
+          <div className="flex gap-2">
+            <input
+              value={youtubeUrl}
+              onChange={(e) => setYoutubeUrl(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Enter") void fetchYoutubeTranscript();
+              }}
+              placeholder="https://www.youtube.com/watch?v=..."
+              disabled={isProcessing || youtubeFetching}
+              className="flex-1 rounded-lg border border-neutral-700 bg-neutral-900 px-4 py-2.5 text-sm text-neutral-200 placeholder:text-neutral-600 focus:border-blue-500 focus:outline-none disabled:opacity-50"
+            />
+            <button
+              onClick={() => void fetchYoutubeTranscript()}
+              disabled={
+                !youtubeUrl.trim() || isProcessing || youtubeFetching
+              }
+              className="shrink-0 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium transition-colors hover:bg-blue-500 disabled:opacity-40"
             >
-              <path
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
-              />
-            </svg>
-            <p className="mb-2 text-lg font-medium">{uploadTitle}</p>
-            <p className="mb-4 text-sm text-neutral-500">{uploadHint}</p>
-            {fileName && fileSize ? (
-              <p className="mb-2 text-xs text-neutral-500">
-                {fileName} &middot; {fileSize}
-              </p>
-            ) : null}
-            <p className="text-xs text-neutral-600">
-              MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
-            </p>
-            <p className="mt-2 text-xs text-neutral-600">
-              Video uploads stay local. The app extracts the audio track and
-              ignores the picture track.
-            </p>
-            {!canSelectNewFile ? (
-              <p className="mt-2 text-xs text-neutral-500">
-                Choose another file after the current transcription finishes.
-              </p>
-            ) : null}
-          </>
-        )}
-        <input
-          ref={fileInputRef}
-          type="file"
-          accept={ACCEPTED_FORMATS}
-          onChange={onFileSelect}
-          className="hidden"
-        />
-      </div>
-
-      <div className="mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
-        <div className="flex flex-col gap-2">
-          <div>
-            <p className="text-sm font-medium text-neutral-100">Whisper Model</p>
-            <p className="text-xs text-neutral-500">
-              Ranked by speed and accuracy. Each model downloads once per
-              browser and then stays cached locally.
-            </p>
-            <p className="mt-2 text-xs text-neutral-600">
-              English-only models. Better accuracy means a larger download and
-              slower transcription.
-            </p>
+              {youtubeFetching ? "Fetching..." : "Fetch Transcript"}
+            </button>
           </div>
         </div>
+      )}
 
-        <div className="mt-4 grid gap-3 sm:grid-cols-3">
-          {TRANSCRIPTION_MODELS.map((option) => {
-            const isSelected = option.key === selectedModelKey;
-
-            return (
-              <button
-                key={option.key}
-                type="button"
-                onClick={() => setSelectedModelKey(option.key)}
-                disabled={isProcessing}
-                className={`rounded-xl border p-4 text-left transition-colors ${
-                  isSelected
-                    ? "border-blue-500 bg-blue-500/10"
-                    : "border-neutral-800 bg-neutral-950/40 hover:border-neutral-700"
-                } ${isProcessing ? "cursor-not-allowed opacity-70" : ""}`}
-              >
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <p className="font-medium text-neutral-100">{option.name}</p>
-                    <p className="mt-1 text-xs text-neutral-500">
-                      {option.summary}
-                    </p>
-                  </div>
-                  {option.recommended && (
-                    <span className="rounded-full bg-blue-500/15 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-blue-300">
-                      Recommended
-                    </span>
-                  )}
-                </div>
-
-                <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
-                  <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
-                    {option.languageLabel}
-                  </span>
-                  <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
-                    Speed rank {option.speedRank}/3
-                  </span>
-                  <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
-                    Accuracy rank {option.accuracyRank}/3
-                  </span>
-                </div>
-              </button>
-            );
-          })}
+      {/* ─── Divider ──────────────────────────────────────────── */}
+      {state !== "complete" && (
+        <div className="mb-4 flex items-center gap-3">
+          <div className="h-px flex-1 bg-neutral-800" />
+          <span className="text-xs text-neutral-600">or upload a file</span>
+          <div className="h-px flex-1 bg-neutral-800" />
         </div>
-      </div>
+      )}
 
+      {/* ─── File Upload Panel ────────────────────────────────── */}
+      {state !== "complete" && (
+        <div className="mb-8">
+          <div
+            onDragOver={canSelectNewFile ? onDragOver : undefined}
+            onDragLeave={canSelectNewFile ? onDragLeave : undefined}
+            onDrop={canSelectNewFile ? onDrop : undefined}
+            onClick={() => {
+              if (canSelectNewFile) {
+                fileInputRef.current?.click();
+              }
+            }}
+            className={uploadPanelClassName}
+          >
+            {isProcessing ? (
+              <>
+                <div className="mb-2 flex items-center gap-3">
+                  <div className="relative h-3 w-3">
+                    <div className="absolute inset-0 animate-ping rounded-full bg-blue-500 opacity-75" />
+                    <div className="relative h-3 w-3 rounded-full bg-blue-500" />
+                  </div>
+                  <p className="font-medium">
+                    {status || getStageLabel(progress)}
+                  </p>
+                </div>
+
+                {fileName && (
+                  <p className="mb-5 ml-6 text-sm text-neutral-500">
+                    {fileName} &middot; {fileSize}
+                  </p>
+                )}
+
+                {progress ? (
+                  <div>
+                    <div className="mb-1.5 flex justify-between text-sm text-neutral-400">
+                      <span>{progress.stage}</span>
+                      <span>{progress.percent}%</span>
+                    </div>
+                    <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+                      <div
+                        className="h-full rounded-full bg-blue-500 transition-all duration-300 ease-out"
+                        style={{ width: `${progress.percent}%` }}
+                      />
+                    </div>
+                    {progress.detail && (
+                      <p className="mt-1.5 truncate text-xs text-neutral-600">
+                        {progress.detail}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <div className="h-2 overflow-hidden rounded-full bg-neutral-800">
+                    <div className="h-full w-2/3 animate-pulse rounded-full bg-blue-500" />
+                  </div>
+                )}
+
+                <p className="mt-3 text-xs text-neutral-600">
+                  {transcriptSource === "youtube"
+                    ? "Fetching transcript from YouTube captions..."
+                    : `Using ${selectedModel.name}. The first run per model can take longer while the browser downloads and caches it.`}
+                </p>
+              </>
+            ) : (
+              <>
+                <svg
+                  className="mx-auto mb-4 h-12 w-12 text-neutral-500"
+                  fill="none"
+                  viewBox="0 0 24 24"
+                  strokeWidth={1.5}
+                  stroke="currentColor"
+                >
+                  <path
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    d="M12 18.75a6 6 0 006-6v-1.5m-6 7.5a6 6 0 01-6-6v-1.5m6 7.5v3.75m-3.75 0h7.5M12 15.75a3 3 0 01-3-3V4.5a3 3 0 116 0v8.25a3 3 0 01-3 3z"
+                  />
+                </svg>
+                <p className="mb-2 text-lg font-medium">{uploadTitle}</p>
+                <p className="mb-4 text-sm text-neutral-500">{uploadHint}</p>
+                {fileName && fileSize ? (
+                  <p className="mb-2 text-xs text-neutral-500">
+                    {fileName} &middot; {fileSize}
+                  </p>
+                ) : null}
+                <p className="text-xs text-neutral-600">
+                  MP4, MOV, MKV, MP3, WAV, FLAC, M4A, OGG, and more
+                </p>
+                <p className="mt-2 text-xs text-neutral-600">
+                  Video uploads stay local. The app extracts the audio track and
+                  ignores the picture track.
+                </p>
+                {!canSelectNewFile ? (
+                  <p className="mt-2 text-xs text-neutral-500">
+                    Choose another file after the current transcription finishes.
+                  </p>
+                ) : null}
+              </>
+            )}
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept={ACCEPTED_FORMATS}
+              onChange={onFileSelect}
+              className="hidden"
+            />
+          </div>
+        </div>
+      )}
+
+      {/* ─── Model Selector (file uploads only, not for YouTube) ─ */}
+      {state !== "complete" && !youtubeFetching && (
+        <div className="mb-8 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
+          <div className="flex flex-col gap-2">
+            <div>
+              <p className="text-sm font-medium text-neutral-100">
+                Whisper Model
+              </p>
+              <p className="text-xs text-neutral-500">
+                Ranked by speed and accuracy. Each model downloads once per
+                browser and then stays cached locally.
+              </p>
+              <p className="mt-2 text-xs text-neutral-600">
+                English-only models. Better accuracy means a larger download and
+                slower transcription. Used for local file uploads only.
+              </p>
+            </div>
+          </div>
+
+          <div className="mt-4 grid gap-3 sm:grid-cols-3">
+            {TRANSCRIPTION_MODELS.map((option) => {
+              const isSelected = option.key === selectedModelKey;
+
+              return (
+                <button
+                  key={option.key}
+                  type="button"
+                  onClick={() => setSelectedModelKey(option.key)}
+                  disabled={isProcessing}
+                  className={`rounded-xl border p-4 text-left transition-colors ${
+                    isSelected
+                      ? "border-blue-500 bg-blue-500/10"
+                      : "border-neutral-800 bg-neutral-950/40 hover:border-neutral-700"
+                  } ${isProcessing ? "cursor-not-allowed opacity-70" : ""}`}
+                >
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <p className="font-medium text-neutral-100">
+                        {option.name}
+                      </p>
+                      <p className="mt-1 text-xs text-neutral-500">
+                        {option.summary}
+                      </p>
+                    </div>
+                    {option.recommended && (
+                      <span className="rounded-full bg-blue-500/15 px-2 py-1 text-[10px] font-medium uppercase tracking-wide text-blue-300">
+                        Recommended
+                      </span>
+                    )}
+                  </div>
+
+                  <div className="mt-3 flex flex-wrap gap-2 text-[11px]">
+                    <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
+                      {option.languageLabel}
+                    </span>
+                    <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
+                      Speed rank {option.speedRank}/3
+                    </span>
+                    <span className="rounded-full border border-neutral-700 px-2 py-1 text-neutral-300">
+                      Accuracy rank {option.accuracyRank}/3
+                    </span>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ─── Error ────────────────────────────────────────────── */}
       {state === "error" && (
         <div className="rounded-2xl border border-red-900/50 bg-red-950/20 p-8">
           <p className="mb-2 font-medium text-red-400">Something went wrong</p>
@@ -648,18 +975,29 @@ export default function Transcriber() {
         </div>
       )}
 
+      {/* ─── Complete State ───────────────────────────────────── */}
       {state === "complete" && (
         <div className="space-y-4">
+          {/* File info + export bar */}
           <div className="rounded-2xl border border-neutral-800 bg-neutral-900/50 p-6">
             <div className="mb-4 flex items-center justify-between">
               <div>
                 <p className="text-sm text-neutral-400">{fileName}</p>
-                <p className="text-xs text-neutral-600">{fileSize}</p>
-                <p className="mt-1 text-xs text-neutral-500">
-                  Transcribed with {usedModel.name} · Speed rank{" "}
-                  {usedModel.speedRank}/3 · Accuracy rank{" "}
-                  {usedModel.accuracyRank}/3
-                </p>
+                {fileSize && (
+                  <p className="text-xs text-neutral-600">{fileSize}</p>
+                )}
+                {transcriptSource === "file" && (
+                  <p className="mt-1 text-xs text-neutral-500">
+                    Transcribed with {usedModel.name} · Speed rank{" "}
+                    {usedModel.speedRank}/3 · Accuracy rank{" "}
+                    {usedModel.accuracyRank}/3
+                  </p>
+                )}
+                {transcriptSource === "youtube" && (
+                  <p className="mt-1 text-xs text-neutral-500">
+                    Transcript from YouTube captions
+                  </p>
+                )}
               </div>
               <div className="flex flex-wrap justify-end gap-2">
                 <button
@@ -689,54 +1027,54 @@ export default function Transcriber() {
               </div>
             </div>
 
-            {previewSrc && previewType === "video" && (
-              <video
-                ref={(node) => {
-                  mediaRef.current = node;
-                }}
-                src={previewSrc}
-                controls
-                className="mb-4 w-full rounded-xl bg-black"
-              />
-            )}
-
-            {previewSrc && previewType === "audio" && (
-              <audio
-                ref={(node) => {
-                  mediaRef.current = node;
-                }}
-                src={previewSrc}
-                controls
-                className="mb-4 h-10 w-full [&::-webkit-media-controls-panel]:bg-neutral-800"
-              />
-            )}
-
-            <div className="max-h-[28rem] overflow-y-auto pr-2">
-              {chunks.length > 0 ? (
-                <p className="leading-relaxed text-neutral-200">
-                  {chunks.map((chunk, index) => (
-                    <span
-                      key={`${chunk.start}-${chunk.end}-${index}`}
-                      ref={index === activeWordIndex ? activeWordRef : null}
-                      onClick={() => seekToWord(chunk)}
-                      className={`cursor-pointer rounded px-0.5 transition-colors duration-150 ${
-                        index === activeWordIndex
-                          ? "bg-blue-500/30 text-white"
-                          : "hover:bg-neutral-800"
-                      }`}
-                    >
-                      {chunk.text}
-                    </span>
-                  ))}
-                </p>
-              ) : (
-                <p className="whitespace-pre-wrap leading-relaxed text-neutral-200">
-                  {transcript}
-                </p>
+            {/* ─── Video / Audio Player ───────────────────────── */}
+            <div ref={playerContainerRef}>
+              {transcriptSource === "youtube" && youtubeVideoId && (
+                <div className="mb-4 aspect-video w-full overflow-hidden rounded-xl bg-black">
+                  <div id="yt-player-container" className="h-full w-full" />
+                </div>
               )}
+
+              {transcriptSource === "file" &&
+                previewSrc &&
+                previewType === "video" && (
+                  <video
+                    ref={(node) => {
+                      mediaRef.current = node;
+                    }}
+                    src={previewSrc}
+                    controls
+                    className="mb-4 w-full rounded-xl bg-black"
+                  />
+                )}
+
+              {transcriptSource === "file" &&
+                previewSrc &&
+                previewType === "audio" && (
+                  <audio
+                    ref={(node) => {
+                      mediaRef.current = node;
+                    }}
+                    src={previewSrc}
+                    controls
+                    className="mb-4 h-10 w-full [&::-webkit-media-controls-panel]:bg-neutral-800"
+                  />
+                )}
             </div>
           </div>
 
+          {/* ─── Review System (transcript + reviews + feedback) */}
+          <ReviewSystem
+            chunks={chunks}
+            transcript={transcript}
+            activeWordIndex={activeWordIndex}
+            activeWordRef={activeWordRef}
+            onSeekToWord={seekToWord}
+            onSeekToTime={seekToTime}
+            playerRef={playerContainerRef}
+          />
+
+          {/* ─── Reset button ─────────────────────────────────── */}
           <button
             onClick={reset}
             className="w-full rounded-xl bg-neutral-800 py-3 text-sm font-medium transition-colors hover:bg-neutral-700"
