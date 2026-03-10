@@ -304,10 +304,19 @@ export default function ReviewSystem({
 
   const handleTimestampClick = useCallback(
     (time: number) => {
-      // Scroll to player
-      playerRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+      // Scroll to player using window.scrollTo for reliability across layouts
+      const el = playerRef.current;
+      if (el) {
+        const rect = el.getBoundingClientRect();
+        const targetY =
+          window.scrollY +
+          rect.top -
+          window.innerHeight / 2 +
+          rect.height / 2;
+        window.scrollTo({ top: Math.max(0, targetY), behavior: "smooth" });
+      }
       // Seek after a short delay to let scroll finish
-      setTimeout(() => onSeekToTime(time), 350);
+      setTimeout(() => onSeekToTime(time), 400);
     },
     [playerRef, onSeekToTime]
   );
