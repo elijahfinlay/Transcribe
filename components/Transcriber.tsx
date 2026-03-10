@@ -792,6 +792,9 @@ export default function Transcriber() {
             onDrop={canSelectNewFile ? onDrop : undefined}
             onClick={() => {
               if (canSelectNewFile) {
+                if (fileInputRef.current) {
+                  fileInputRef.current.value = "";
+                }
                 fileInputRef.current?.click();
               }
             }}

@@ -7,7 +7,6 @@ const AUDIO_EXTENSIONS = new Set([
   "aac",
   "wma",
   "opus",
-  "webm",
 ]);
 
 const VIDEO_EXTENSIONS = new Set([
@@ -32,6 +31,12 @@ export function getFileType(
   file: MediaFileLike
 ): "audio" | "video" | "unknown" {
   const ext = file.name.split(".").pop()?.toLowerCase() ?? "";
+
+  // For .webm, prefer the MIME type since it can be audio-only or video
+  if (ext === "webm") {
+    if (file.type?.startsWith("audio/")) return "audio";
+    return "video";
+  }
 
   if (AUDIO_EXTENSIONS.has(ext)) return "audio";
   if (VIDEO_EXTENSIONS.has(ext)) return "video";
