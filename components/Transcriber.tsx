@@ -113,10 +113,20 @@ export default function Transcriber() {
   // ─── Web Worker Setup ─────────────────────────────────────────────
 
   useEffect(() => {
-    const worker = new Worker(
-      new URL("../workers/transcriptionWorker.ts", import.meta.url),
-      { type: "module" }
-    );
+    let worker: Worker;
+    try {
+      worker = new Worker(
+        new URL("../workers/transcriptionWorker.ts", import.meta.url),
+        { type: "module" }
+      );
+    } catch (err: any) {
+      console.error("[Transcribe] Worker init failed:", err);
+      setError(
+        "Failed to start the transcription engine. Try refreshing the page."
+      );
+      setState("error");
+      return;
+    }
 
     worker.onmessage = (event: MessageEvent<TranscriptionWorkerMessage>) => {
       const message = event.data;
@@ -157,7 +167,11 @@ export default function Transcriber() {
     };
 
     worker.onerror = (event) => {
-      setError(event.message || "Transcription worker failed.");
+      console.error("[Transcribe] Worker error:", event);
+      setError(
+        event.message ||
+          "Transcription worker failed to load. Try refreshing the page."
+      );
       setState("error");
       setProgress(null);
       setStatus("");
@@ -272,6 +286,8 @@ export default function Transcriber() {
 
   const processFile = useCallback(
     async (file: File) => {
+      console.log("[Transcribe] processFile called:", file.name, file.type);
+
       setError("");
       setTranscript("");
       setChunks([]);
@@ -288,20 +304,31 @@ export default function Transcriber() {
       hasExportedRef.current = false;
 
       const fileType = getFileType(file);
+      console.log("[Transcribe] file type:", fileType);
+
       if (fileType === "unknown") {
         setError("Unsupported file format. Please use an audio or video file.");
         setState("error");
         return;
       }
 
+      if (!workerRef.current) {
+        setError(
+          "Transcription engine is not ready. Please refresh the page and try again."
+        );
+        setState("error");
+        return;
+      }
+
+      // Set extracting state immediately so the progress UI appears
+      setState("extracting");
+
       try {
         let audio: Float32Array;
 
         if (fileType === "video") {
-          setState("extracting");
           audio = await extractAudioFromVideo(file);
         } else {
-          setState("extracting");
           setStatus("Decoding audio...");
           setProgress({
             stage: "Decoding audio",
@@ -324,6 +351,7 @@ export default function Transcriber() {
           [audio.buffer]
         );
       } catch (err: any) {
+        console.error("[Transcribe] processFile error:", err);
         setError(err?.message || "Failed to process the file.");
         setState("error");
         setProgress(null);
@@ -409,6 +437,7 @@ export default function Transcriber() {
       event.preventDefault();
       setDragOver(false);
       const file = event.dataTransfer.files[0];
+      console.log("[Transcribe] onDrop:", file?.name, file?.type);
       if (file) {
         void processFile(file);
       }
@@ -744,6 +773,22 @@ export default function Transcriber() {
         </p>
       </div>
 
+      {/* ─── Error (always visible at top) ─────────────────────── */}
+      {state === "error" && (
+        <div className="mb-4 rounded-2xl border border-red-900/50 bg-red-950/20 p-6">
+          <p className="mb-2 font-medium text-red-400">
+            Something went wrong
+          </p>
+          <p className="mb-4 text-sm text-red-300/70">{error}</p>
+          <button
+            onClick={reset}
+            className="rounded-lg bg-neutral-800 px-5 py-2.5 text-sm transition-colors hover:bg-neutral-700"
+          >
+            Try again
+          </button>
+        </div>
+      )}
+
       {/* ─── YouTube URL Input ─────────────────────────────────── */}
       {state !== "complete" && (
         <div className="mb-4 rounded-2xl border border-neutral-800 bg-neutral-900/50 p-5">
@@ -961,20 +1006,6 @@ export default function Transcriber() {
               );
             })}
           </div>
-        </div>
-      )}
-
-      {/* ─── Error ────────────────────────────────────────────── */}
-      {state === "error" && (
-        <div className="rounded-2xl border border-red-900/50 bg-red-950/20 p-8">
-          <p className="mb-2 font-medium text-red-400">Something went wrong</p>
-          <p className="mb-6 text-sm text-red-300/70">{error}</p>
-          <button
-            onClick={reset}
-            className="rounded-lg bg-neutral-800 px-5 py-2.5 text-sm transition-colors hover:bg-neutral-700"
-          >
-            Try again
-          </button>
         </div>
       )}
 
