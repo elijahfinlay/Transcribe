@@ -929,7 +929,7 @@ export default function Transcriber() {
                 </p>
                 <p className="mt-2 text-xs text-neutral-600">
                   Video uploads stay local. The app extracts the audio track and
-                  ignores the picture track.
+                  ignores the picture track. Max file size: 5 GB.
                 </p>
                 {!canSelectNewFile ? (
                   <p className="mt-2 text-xs text-neutral-500">
