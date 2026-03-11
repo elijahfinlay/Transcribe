@@ -30,6 +30,7 @@ import type {
 import ReviewSystem from "./ReviewSystem";
 import OnboardingWalkthrough from "./OnboardingWalkthrough";
 
+const MAX_FILE_SIZE = 5 * 1024 * 1024 * 1024; // 5 GB
 const FFMPEG_CORE_VERSION = "0.12.9";
 const FFMPEG_BASE_URL = `https://unpkg.com/@ffmpeg/core@${FFMPEG_CORE_VERSION}/dist/umd`;
 
@@ -302,6 +303,14 @@ export default function Transcriber() {
       setYoutubeVideoId("");
       originalFileRef.current = file;
       hasExportedRef.current = false;
+
+      if (file.size > MAX_FILE_SIZE) {
+        setError(
+          `File is too large (${formatFileSize(file.size)}). Maximum upload size is 5 GB.`
+        );
+        setState("error");
+        return;
+      }
 
       const fileType = getFileType(file);
       console.log("[Transcribe] file type:", fileType);
