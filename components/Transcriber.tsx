@@ -192,15 +192,6 @@ export default function Transcriber() {
       return ffmpegRef.current;
     }
 
-    if (
-      typeof window !== "undefined" &&
-      (typeof SharedArrayBuffer === "undefined" || !window.crossOriginIsolated)
-    ) {
-      throw new Error(
-        "This browser session is missing the isolation features needed to extract audio from video files. Refresh and try again."
-      );
-    }
-
     setStatus("Loading the local audio extractor...");
     const ffmpeg = new FFmpeg();
 
