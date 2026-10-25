@@ -44,7 +44,7 @@ export async function POST(req: NextRequest) {
     }
 
     const videoId = extractVideoId(url.trim());
-    if (!videoId) {
+    if (!videoId || !/^[a-zA-Z0-9_-]{11}$/.test(videoId)) {
       return NextResponse.json(
         { error: "Could not extract a video ID from that URL." },
         { status: 400 }
